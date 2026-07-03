@@ -1,0 +1,17 @@
+{
+  "name": "Exemplo Reels 9:16",
+  "file_path": "storage/templates/meu_template.mp4",
+  "overlay_x": 0,
+  "overlay_y": 0,
+  "overlay_w": 1080,
+  "overlay_h": 1920,
+  "fit_mode": "cover",
+  "output_w": 1080,
+  "output_h": 1920,
+  "output_format": "mp4",
+  "video_bitrate": "8M",
+  "audio_source": "raw",
+  "audio_mix_raw": 1.0,
+  "audio_mix_template": 0.5,
+  "duration_rule": "raw"
+}
