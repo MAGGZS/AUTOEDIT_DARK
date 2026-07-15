@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "../api";
-import PositionEditor from "../components/PositionEditor";
+import CompositionEditor from "../components/CompositionEditor";
 
 type Template = {
   id: number; name: string; file_path: string;
@@ -267,7 +267,7 @@ export default function TemplatesPage() {
                 <div style={{ flex: "0 0 auto" }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>Editor visual</div>
                   <p style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Arraste a caixa para reposicionar.</p>
-                  <PositionEditor
+                  <CompositionEditor
                     templateUrl={previewUrl}
                     outputW={editing.output_w || 1080} outputH={editing.output_h || 1920}
                     overlayX={editing.overlay_x ?? 0} overlayY={editing.overlay_y ?? 0}

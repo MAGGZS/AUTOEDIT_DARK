@@ -7,8 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
 
-from database import init_db, SessionLocal, Template
+from database import Template
 from services.composer import compose
+
 
 def main():
     if len(sys.argv) < 3:
@@ -16,11 +17,8 @@ def main():
         sys.exit(1)
 
     template_path = sys.argv[1]
-    input_path = sys.argv[2]
-    output_path = "test_output.mp4"
-
-    init_db()
-    db = SessionLocal()
+    input_path    = sys.argv[2]
+    output_path   = "test_output.mp4"
 
     tpl = Template(
         name="Teste", file_path=template_path,
@@ -32,10 +30,9 @@ def main():
 
     print(f"Compondo: {input_path} sobre {template_path}")
     print(f"Saída: {output_path}")
-
     compose(tpl, input_path, output_path, progress_callback=lambda p: print(f"  {p}%", end="\r"))
     print(f"\nConcluído! Arquivo gerado: {output_path}")
-    db.close()
+
 
 if __name__ == "__main__":
     main()

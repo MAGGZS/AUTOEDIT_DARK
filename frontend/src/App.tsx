@@ -1,4 +1,4 @@
-import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import TemplatesPage from "./pages/TemplatesPage";
 import ProcessPage from "./pages/ProcessPage";
 import ResultsPage from "./pages/ResultsPage";
