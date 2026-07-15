@@ -35,10 +35,10 @@ class TemplateOut(TemplateCreate):
 class JobItemOut(BaseModel):
     id: int
     input_path: str
-    output_path: Optional[str]
+    output_path: Optional[str] = None
     status: str
     progress: int
-    error_msg: Optional[str]
+    error_msg: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -22,11 +22,19 @@ from pathlib import Path
 from database import Template
 
 
+def _safe_path(path: str, base_dir: Path) -> Path:
+    """Garante que o path resolvido está dentro de base_dir (evita path traversal)."""
+    resolved = (base_dir / Path(path).name).resolve()
+    if not str(resolved).startswith(str(base_dir.resolve())):
+        raise ValueError(f"Path inválido: {path}")
+    return resolved
+
+
 def _has_nvenc() -> bool:
     """Verifica se o encoder NVENC está disponível."""
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [_ffmpeg_path(), "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=10
         )
         return "h264_nvenc" in result.stdout
@@ -96,11 +104,25 @@ def _duration_args(tpl: Template) -> list[str]:
     return ["-shortest"]
 
 
+def _ffprobe_path() -> str:
+    p = shutil.which("ffprobe")
+    if not p:
+        raise RuntimeError("ffprobe não encontrado no PATH")
+    return p
+
+
+def _ffmpeg_path() -> str:
+    p = shutil.which("ffmpeg")
+    if not p:
+        raise RuntimeError("ffmpeg não encontrado no PATH")
+    return p
+
+
 def _get_duration(path: str) -> float:
     """Retorna a duração do arquivo em segundos via ffprobe."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [_ffprobe_path(), "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
             capture_output=True, text=True, timeout=30
         )
@@ -112,7 +134,7 @@ def _get_duration(path: str) -> float:
 def _template_has_audio(path: str) -> bool:
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
+            [_ffprobe_path(), "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=10
         )
@@ -194,9 +216,7 @@ def compose(
             + ["-y", output_path]
         )
 
-    cmd = ["ffmpeg", "-hide_banner"] + cmd
-
-    log_file = open(log_path, "w", encoding="utf-8", errors="replace") if log_path else subprocess.DEVNULL
+    cmd = [_ffmpeg_path(), "-hide_banner"] + cmd
 
     try:
         proc = subprocess.Popen(
@@ -211,10 +231,11 @@ def compose(
         duration_re = re.compile(r"Duration:\s+(\d+):(\d+):([\d.]+)")
         time_re = re.compile(r"time=(\d+):(\d+):([\d.]+)")
         total_secs = raw_duration or 1.0
+        stderr_lines: list[str] = []
 
+        # Lê stderr linha a linha para atualizar progresso sem risco de deadlock
         for line in proc.stderr:
-            if log_path:
-                log_file.write(line)
+            stderr_lines.append(line)
 
             m = duration_re.search(line)
             if m and total_secs <= 1.0:
@@ -229,11 +250,15 @@ def compose(
                 progress_callback(pct)
 
         proc.wait()
+
+        if log_path:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
+                lf.writelines(stderr_lines)
+
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg saiu com código {proc.returncode}")
 
         if progress_callback:
             progress_callback(100)
     finally:
-        if log_path:
-            log_file.close()
+        pass

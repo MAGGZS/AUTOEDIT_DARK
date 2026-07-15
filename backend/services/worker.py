@@ -1,87 +1,88 @@
 """
 Worker de processamento: consome jobs da fila e chama o composer.
-Roda em background thread para não bloquear a API.
+Usa store em memória para jobs/itens. Sem acesso ao banco de dados.
 """
 import asyncio
-import os
+import re
 from pathlib import Path
 from datetime import datetime
-from sqlalchemy.orm import Session
-from database import SessionLocal, Job, JobItem, Template
+from database import SessionLocal, Template
 from services.composer import compose
 from ws_manager import manager
+import store
 
-STORAGE_OUTPUT = Path(__file__).parent.parent / "backend" / "storage" / "output"
-STORAGE_LOGS = Path(__file__).parent.parent / "backend" / "storage" / "logs"
+_SAFE_NAME_RE = re.compile(r"[^\w\-.]")
 
-# Resolve caminhos relativos ao próprio backend
-BASE = Path(__file__).parent.parent
-OUTPUT_DIR = BASE / "storage" / "output"
-LOGS_DIR = BASE / "storage" / "logs"
+
+def _safe_stem(path: str) -> str:
+    stem = Path(path).stem
+    return _SAFE_NAME_RE.sub("_", stem)[:64]
 
 
 async def _notify(job_id: int, item_id: int, status: str, progress: int):
     await manager.broadcast({
-        "job_id": job_id,
-        "item_id": item_id,
-        "status": status,
-        "progress": progress,
+        "job_id": job_id, "item_id": item_id,
+        "status": status, "progress": progress,
     })
 
 
-def _process_item(item: JobItem, template: Template, db: Session, loop: asyncio.AbstractEventLoop):
-    """Processa um único item de job de forma síncrona (roda em thread)."""
-    item.status = "processing"
-    db.commit()
-    asyncio.run_coroutine_threadsafe(_notify(item.job_id, item.id, "processing", 0), loop)
+def _process_item(item: dict, template: Template, loop: asyncio.AbstractEventLoop):
+    store.update_item(item["id"], status="processing")
+    asyncio.run_coroutine_threadsafe(
+        _notify(item["job_id"], item["id"], "processing", 0), loop
+    )
 
-    input_name = Path(item.input_path).stem
+    stem = _safe_stem(item["input_path"])
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    out_name = f"{input_name}_{timestamp}.{template.output_format}"
-    out_path = str(OUTPUT_DIR / out_name)
-    log_path = str(LOGS_DIR / f"job_{item.job_id}_item_{item.id}.log")
+    out_name = f"{stem}_{timestamp}.{template.output_format}"
+    out_path = str(store.OUTPUT_DIR / out_name)
+    log_path = str(store.LOGS_DIR / f"job_{item['job_id']}_item_{item['id']}.log")
 
     def on_progress(pct: int):
-        item.progress = pct
-        db.commit()
-        asyncio.run_coroutine_threadsafe(_notify(item.job_id, item.id, "processing", pct), loop)
+        store.update_item(item["id"], progress=pct)
+        asyncio.run_coroutine_threadsafe(
+            _notify(item["job_id"], item["id"], "processing", pct), loop
+        )
 
     try:
-        compose(template, item.input_path, out_path, progress_callback=on_progress, log_path=log_path)
-        item.status = "done"
-        item.output_path = out_path
-        item.progress = 100
+        compose(template, item["input_path"], out_path,
+                progress_callback=on_progress, log_path=log_path)
+        store.update_item(item["id"], status="done", output_path=out_path,
+                          progress=100, log_path=log_path)
     except Exception as e:
-        item.status = "error"
-        item.error_msg = str(e)
+        store.update_item(item["id"], status="error", error_msg=str(e),
+                          log_path=log_path)
 
-    item.log_path = log_path
-    db.commit()
+    updated = store.get_item(item["id"])
     asyncio.run_coroutine_threadsafe(
-        _notify(item.job_id, item.id, item.status, item.progress), loop
+        _notify(item["job_id"], item["id"], updated["status"], updated["progress"]), loop
     )
 
 
 async def run_job(job_id: int):
-    """Processa todos os itens de um job sequencialmente."""
-    loop = asyncio.get_event_loop()
-    db: Session = SessionLocal()
+    loop = asyncio.get_running_loop()
+    job = store.job_view(job_id)
+    if not job:
+        return
+
+    store.update_job_status(job_id, "processing")
+
+    db = SessionLocal()
     try:
-        job: Job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
+        template = db.query(Template).filter(Template.id == job["template_id"]).first()
+        if not template:
+            store.update_job_status(job_id, "error")
             return
-        template: Template = job.template
-        job.status = "processing"
-        db.commit()
 
-        for item in job.items:
-            if item.status != "queued":
+        for item in job["items"]:
+            if item["status"] != "queued":
                 continue
-            await asyncio.to_thread(_process_item, item, template, db, loop)
+            await asyncio.to_thread(_process_item, item, template, loop)
 
-        # Atualiza status geral do job
-        statuses = {i.status for i in job.items}
-        job.status = "done" if statuses <= {"done"} else ("error" if "done" not in statuses else "done")
-        db.commit()
+        # Atualiza status geral
+        final_items = store.job_view(job_id)["items"]
+        statuses = {i["status"] for i in final_items}
+        job_status = "done" if statuses <= {"done"} else "error"
+        store.update_job_status(job_id, job_status)
     finally:
         db.close()

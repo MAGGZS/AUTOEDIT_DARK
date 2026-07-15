@@ -8,6 +8,7 @@ import api from "../api";
 import { useJobSocket } from "../useJobSocket";
 import type { WsMessage } from "../useJobSocket";
 import CompositionEditor from "../components/CompositionEditor";
+import CompositionThumb from "../components/CompositionThumb";
 
 type Template = {
   id: number; name: string;
@@ -16,8 +17,8 @@ type Template = {
   fit_mode: string; output_format: string; video_bitrate: string;
   audio_source: string; audio_mix_raw: number; audio_mix_template: number; duration_rule: string;
 };
-type VideoFile = { path: string; name: string; frame: string; selected: boolean };
-type JobItem = { id: number; input_path: string; status: string; progress: number; error_msg?: string };
+type VideoFile = { path: string; name: string; frame: string; outputFrame?: string; selected: boolean };
+type JobItem = { id: number; input_path: string; output_path?: string; status: string; progress: number; error_msg?: string };
 type Job = { id: number; template_id: number; status: string; items: JobItem[] };
 
 const STATUS_LABEL: Record<string, string> = { queued: "Na fila", processing: "...", done: "✓", error: "✕" };
@@ -34,9 +35,7 @@ function extractFrame(file: File): Promise<string> {
     v.playsInline = true;
     v.src = URL.createObjectURL(file);
 
-    v.onloadedmetadata = () => {
-      v.currentTime = Math.min(0.5, v.duration * 0.1);
-    };
+    v.onloadedmetadata = () => { v.currentTime = Math.min(0.5, v.duration * 0.1); };
 
     v.onseeked = () => {
       try {
@@ -45,16 +44,38 @@ function extractFrame(file: File): Promise<string> {
         c.height = v.videoHeight || 568;
         c.getContext("2d")!.drawImage(v, 0, 0);
         resolve(c.toDataURL("image/jpeg", 0.7));
-      } catch {
-        resolve("");
-      } finally {
-        URL.revokeObjectURL(v.src);
-      }
+      } catch { resolve(""); }
+      finally { URL.revokeObjectURL(v.src); }
     };
 
     v.onerror = () => { URL.revokeObjectURL(v.src); resolve(""); };
-    // timeout de segurança
     setTimeout(() => resolve(""), 8000);
+  });
+}
+
+function extractFrameFromUrl(url: string): Promise<string> {
+  return new Promise(resolve => {
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    v.muted = true;
+    v.playsInline = true;
+    v.crossOrigin = "anonymous";
+    v.src = url;
+
+    v.onloadedmetadata = () => { v.currentTime = Math.min(0.5, v.duration * 0.1); };
+
+    v.onseeked = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = v.videoWidth || 320;
+        c.height = v.videoHeight || 568;
+        c.getContext("2d")!.drawImage(v, 0, 0);
+        resolve(c.toDataURL("image/jpeg", 0.7));
+      } catch { resolve(""); }
+    };
+
+    v.onerror = () => resolve("");
+    setTimeout(() => resolve(""), 10000);
   });
 }
 
@@ -73,6 +94,7 @@ export default function ProcessPage() {
   const [uploading, setUploading] = useState(false);
   const [cols, setCols] = useState(4);
   const [previewVideo, setPreviewVideo] = useState<VideoFile | null>(null);
+  const [previewOutput, setPreviewOutput] = useState<string | null>(null);
   const [loadingFrames, setLoadingFrames] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -94,9 +116,26 @@ export default function ProcessPage() {
     setJobs(prev => prev.map(j => {
       if (j.id !== msg.job_id) return j;
       const updatedItems = j.items.map(i => i.id === msg.item_id ? { ...i, status: msg.status, progress: msg.progress } : i);
+      // Quando item fica done, busca output_path atualizado e extrai frame
+      if (msg.status === "done") {
+        api.get(`/jobs/${j.id}`).then(r => {
+          setJobs(all => all.map(jj => jj.id === j.id ? r.data : jj));
+          const doneItem = r.data.items.find((i: JobItem) => i.id === msg.item_id);
+          if (doneItem?.output_path) {
+            const filename = doneItem.output_path.split(/[\\/]/).pop()!;
+            const url = `http://localhost:8000/output/${encodeURIComponent(filename)}`;
+            extractFrameFromUrl(url).then(outputFrame => {
+              if (outputFrame) {
+                setVideos(prev => prev.map(vv =>
+                  vv.path === doneItem.input_path ? { ...vv, outputFrame } : vv
+                ));
+              }
+            });
+          }
+        });
+      }
       const allDone = updatedItems.every(i => i.status === "done" || i.status === "error");
       const allSuccess = updatedItems.every(i => i.status === "done");
-      // Redireciona quando o job ativo conclui todos os itens com sucesso
       if (allDone && allSuccess && j.id === activeJobId) {
         setTimeout(() => {
           setVideos([]);
@@ -306,10 +345,26 @@ export default function ProcessPage() {
 
                     {/* Thumbnail */}
                     <div style={{ position: "relative", aspectRatio: "9/16", background: "var(--surface2)", overflow: "hidden" }}>
-                      {v.frame
-                        ? <img src={v.frame} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-                        : <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text3)", fontSize: 20 }}>🎥</div>
-                      }
+                      {/* Frame do output processado tem prioridade */}
+                      {v.outputFrame ? (
+                        <img src={v.outputFrame} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      ) : activeTpl && v.frame ? (
+                        /* Prévia em tempo real: template + frame do vídeo na posição do overlay */
+                        <CompositionThumb
+                          templateUrl={`http://localhost:8000/templates/file/${activeTpl.id}`}
+                          videoFrameUrl={v.frame}
+                          outputW={activeTpl.output_w}
+                          outputH={activeTpl.output_h}
+                          overlayX={tplOverlay?.x ?? activeTpl.overlay_x}
+                          overlayY={tplOverlay?.y ?? activeTpl.overlay_y}
+                          overlayW={tplOverlay?.w ?? activeTpl.overlay_w}
+                          overlayH={tplOverlay?.h ?? activeTpl.overlay_h}
+                        />
+                      ) : v.frame ? (
+                        <img src={v.frame} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      ) : (
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text3)", fontSize: 20 }}>🎥</div>
+                      )}
                       {/* Checkbox */}
                       <div style={{
                         position: "absolute", top: 5, left: 5,
@@ -335,8 +390,18 @@ export default function ProcessPage() {
 
                     {/* Ações */}
                     <div className="card-actions" onClick={e => e.stopPropagation()}>
-                      <button className="btn btn-xs" onClick={() => setPreviewVideo(v === previewVideo ? null : v)} title="Preview">
-                        {previewVideo?.path === v.path ? "✕" : "👁"}
+                      <button className="btn btn-xs" onClick={() => {
+                        if (jobItem?.status === "done" && jobItem.output_path) {
+                          const filename = jobItem.output_path.split(/[\\/]/).pop()!;
+                          const url = `http://localhost:8000/output/${encodeURIComponent(filename)}`;
+                          setPreviewOutput(previewOutput === url ? null : url);
+                          setPreviewVideo(null);
+                        } else {
+                          setPreviewVideo(v === previewVideo ? null : v);
+                          setPreviewOutput(null);
+                        }
+                      }} title="Preview">
+                        {(previewVideo?.path === v.path || previewOutput) ? "✕" : "👁"}
                       </button>
                       {jobItem?.status === "error" && (
                         <button className="btn btn-xs btn-danger" onClick={() => retryItem(latestJob.id, jobItem.id)} title="Tentar novamente">↺</button>
@@ -355,11 +420,22 @@ export default function ProcessPage() {
         </div>
       </div>
 
-      {/* Painel direito — editor de composição */}
+      {/* Painel direito — editor de composição ou preview do output */}
       <div className="right-panel">
         <div className="right-panel-header">Preview</div>
         <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-          {activeTpl ? (
+          {previewOutput ? (
+            <>
+              <div style={{ fontSize: 11, color: "var(--text2)" }}>Vídeo processado</div>
+              <video
+                src={previewOutput}
+                controls
+                autoPlay
+                style={{ width: "100%", borderRadius: 6, background: "#000" }}
+              />
+              <button className="btn btn-sm" onClick={() => setPreviewOutput(null)}>✕ Fechar preview</button>
+            </>
+          ) : activeTpl ? (
             <>
               <div style={{ fontSize: 11, color: "var(--text2)" }}>
                 {previewVideo ? previewVideo.name : "Selecione um vídeo para preview"}
@@ -373,6 +449,7 @@ export default function ProcessPage() {
                 overlayY={tplOverlay?.y ?? activeTpl.overlay_y}
                 overlayW={tplOverlay?.w ?? activeTpl.overlay_w}
                 overlayH={tplOverlay?.h ?? activeTpl.overlay_h}
+                onDrag={(x, y, w, h) => setTplOverlay({ x, y, w, h })}
                 onChange={saveOverlay}
               />
               <div style={{ fontSize: 10, color: "var(--text3)" }}>

@@ -1,15 +1,12 @@
 /**
  * CompositionEditor — editor interativo de composição.
- *
- * Mostra o template como fundo e o frame do vídeo bruto em cima,
- * arrastável e redimensionável via mouse. Coordenadas em pixels
- * da resolução de saída (ex: 1080x1920).
- *
- * onChange é chamado a cada mudança com as novas coordenadas.
+ * Suporta drag, resize, snap magnético e guias de centralização.
  */
 import { useEffect, useRef, useState } from "react";
 
-const PANEL_W = 240; // largura do canvas na tela em px
+const PANEL_W  = 240;
+const HANDLE   = 10;
+const SNAP_PX  = 6; // distância em px do canvas para ativar snap
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -23,6 +20,7 @@ type Props = {
   overlayW: number;
   overlayH: number;
   onChange?: (x: number, y: number, w: number, h: number) => void;
+  onDrag?:   (x: number, y: number, w: number, h: number) => void;
   readOnly?: boolean;
 };
 
@@ -33,53 +31,86 @@ type DragState = {
   startRect: Rect;
 };
 
-const HANDLE = 10; // tamanho dos handles de resize em px (no canvas)
+type Guides = { cx: boolean; cy: boolean; left: boolean; right: boolean; top: boolean; bottom: boolean };
+
+const NO_GUIDES: Guides = { cx: false, cy: false, left: false, right: false, top: false, bottom: false };
+
+/** Aplica snap a um valor se estiver próximo de um alvo */
+function snap(val: number, target: number): [number, boolean] {
+  return Math.abs(val - target) <= SNAP_PX ? [target, true] : [val, false];
+}
+
+/** Calcula snap para movimento — snapa bordas e centro do rect */
+function snapMove(r: Rect, panelW: number, panelH: number): [Rect, Guides] {
+  let { x, y, w, h } = r;
+  const g: Guides = { ...NO_GUIDES };
+
+  const cx = panelW / 2;
+  const cy = panelH / 2;
+
+  // Centro horizontal do rect
+  let [snapped, hit] = snap(x + w / 2, cx);
+  if (hit) { x = snapped - w / 2; g.cx = true; }
+
+  // Centro vertical do rect
+  ;[snapped, hit] = snap(y + h / 2, cy);
+  if (hit) { y = snapped - h / 2; g.cy = true; }
+
+  // Borda esquerda
+  ;[snapped, hit] = snap(x, 0);
+  if (hit) { x = snapped; g.left = true; }
+
+  // Borda direita
+  ;[snapped, hit] = snap(x + w, panelW);
+  if (hit) { x = snapped - w; g.right = true; }
+
+  // Borda superior
+  ;[snapped, hit] = snap(y, 0);
+  if (hit) { y = snapped; g.top = true; }
+
+  // Borda inferior
+  ;[snapped, hit] = snap(y + h, panelH);
+  if (hit) { y = snapped - h; g.bottom = true; }
+
+  return [{ x, y, w, h }, g];
+}
 
 export default function CompositionEditor({
   templateUrl, videoFrameUrl,
   outputW, outputH,
   overlayX, overlayY, overlayW, overlayH,
-  onChange, readOnly = false,
+  onChange, onDrag, readOnly = false,
 }: Props) {
-  const scale = PANEL_W / outputW;
+  const scale  = PANEL_W / outputW;
   const panelH = Math.round(outputH * scale);
 
   const [rect, setRect] = useState<Rect>({
-    x: overlayX * scale,
-    y: overlayY * scale,
-    w: overlayW * scale,
-    h: overlayH * scale,
+    x: overlayX * scale, y: overlayY * scale,
+    w: overlayW * scale, h: overlayH * scale,
   });
+  const [guides, setGuides] = useState<Guides>(NO_GUIDES);
 
-  // Sincroniza quando props mudam externamente
   useEffect(() => {
     setRect({
-      x: overlayX * scale,
-      y: overlayY * scale,
-      w: overlayW * scale,
-      h: overlayH * scale,
+      x: overlayX * scale, y: overlayY * scale,
+      w: overlayW * scale, h: overlayH * scale,
     });
   }, [overlayX, overlayY, overlayW, overlayH, scale]);
 
-  const dragRef = useRef<DragState | null>(null);
+  const dragRef      = useRef<DragState | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const emit = (r: Rect) => {
-    onChange?.(
-      Math.round(r.x / scale),
-      Math.round(r.y / scale),
-      Math.round(r.w / scale),
-      Math.round(r.h / scale),
-    );
-  };
+  const emit = (r: Rect) => onChange?.(
+    Math.round(r.x / scale), Math.round(r.y / scale),
+    Math.round(r.w / scale), Math.round(r.h / scale),
+  );
 
   const getHandleAt = (mx: number, my: number, r: Rect): DragState["type"] | null => {
-    const inHandle = (hx: number, hy: number) =>
-      Math.abs(mx - hx) <= HANDLE && Math.abs(my - hy) <= HANDLE;
-    if (inHandle(r.x + r.w, r.y + r.h)) return "resize-br";
-    if (inHandle(r.x,       r.y + r.h)) return "resize-bl";
-    if (inHandle(r.x + r.w, r.y      )) return "resize-tr";
-    if (inHandle(r.x,       r.y      )) return "resize-tl";
+    const near = (hx: number, hy: number) => Math.abs(mx - hx) <= HANDLE && Math.abs(my - hy) <= HANDLE;
+    if (near(r.x + r.w, r.y + r.h)) return "resize-br";
+    if (near(r.x,       r.y + r.h)) return "resize-bl";
+    if (near(r.x + r.w, r.y      )) return "resize-tr";
+    if (near(r.x,       r.y      )) return "resize-tl";
     if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return "move";
     return null;
   };
@@ -99,37 +130,42 @@ export default function CompositionEditor({
     const onMove = (e: MouseEvent) => {
       if (!dragRef.current || !containerRef.current) return;
       const bounds = containerRef.current.getBoundingClientRect();
-      const mx = e.clientX - bounds.left;
-      const my = e.clientY - bounds.top;
-      const dx = mx - dragRef.current.startMouseX;
-      const dy = my - dragRef.current.startMouseY;
-      const s = dragRef.current.startRect;
-      const maxX = PANEL_W;
-      const maxY = panelH;
+      const dx = (e.clientX - bounds.left) - dragRef.current.startMouseX;
+      const dy = (e.clientY - bounds.top)  - dragRef.current.startMouseY;
+      const s  = dragRef.current.startRect;
 
       let r: Rect = { ...s };
       switch (dragRef.current.type) {
         case "move":
-          r = { ...s, x: Math.max(0, Math.min(s.x + dx, maxX - s.w)), y: Math.max(0, Math.min(s.y + dy, maxY - s.h)) };
+          r = { ...s, x: Math.max(0, Math.min(s.x + dx, PANEL_W - s.w)), y: Math.max(0, Math.min(s.y + dy, panelH - s.h)) };
           break;
-        case "resize-br":
-          r = { ...s, w: Math.max(20, s.w + dx), h: Math.max(20, s.h + dy) };
-          break;
-        case "resize-bl":
-          r = { x: Math.min(s.x + dx, s.x + s.w - 20), y: s.y, w: Math.max(20, s.w - dx), h: Math.max(20, s.h + dy) };
-          break;
-        case "resize-tr":
-          r = { x: s.x, y: Math.min(s.y + dy, s.y + s.h - 20), w: Math.max(20, s.w + dx), h: Math.max(20, s.h - dy) };
-          break;
-        case "resize-tl":
-          r = { x: Math.min(s.x + dx, s.x + s.w - 20), y: Math.min(s.y + dy, s.y + s.h - 20), w: Math.max(20, s.w - dx), h: Math.max(20, s.h - dy) };
-          break;
+        case "resize-br": r = { ...s, w: Math.max(20, s.w + dx), h: Math.max(20, s.h + dy) }; break;
+        case "resize-bl": r = { x: Math.min(s.x + dx, s.x + s.w - 20), y: s.y, w: Math.max(20, s.w - dx), h: Math.max(20, s.h + dy) }; break;
+        case "resize-tr": r = { x: s.x, y: Math.min(s.y + dy, s.y + s.h - 20), w: Math.max(20, s.w + dx), h: Math.max(20, s.h - dy) }; break;
+        case "resize-tl": r = { x: Math.min(s.x + dx, s.x + s.w - 20), y: Math.min(s.y + dy, s.y + s.h - 20), w: Math.max(20, s.w - dx), h: Math.max(20, s.h - dy) }; break;
       }
-      setRect(r);
+
+      // Snap apenas no movimento
+      let snapped = r;
+      let g = NO_GUIDES;
+      if (dragRef.current.type === "move") {
+        [snapped, g] = snapMove(r, PANEL_W, panelH);
+      }
+
+      setRect(snapped);
+      setGuides(g);
+      onDrag?.(
+        Math.round(snapped.x / scale), Math.round(snapped.y / scale),
+        Math.round(snapped.w / scale), Math.round(snapped.h / scale),
+      );
     };
 
     const onUp = () => {
-      if (dragRef.current) { emit(rect); dragRef.current = null; }
+      if (dragRef.current) {
+        emit(rect);
+        dragRef.current = null;
+        setGuides(NO_GUIDES);
+      }
     };
 
     window.addEventListener("mousemove", onMove);
@@ -137,26 +173,33 @@ export default function CompositionEditor({
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, [rect]);
 
-  const handles: { type: string; cx: number; cy: number }[] = [
-    { type: "resize-tl", cx: rect.x,          cy: rect.y },
-    { type: "resize-tr", cx: rect.x + rect.w,  cy: rect.y },
-    { type: "resize-bl", cx: rect.x,           cy: rect.y + rect.h },
-    { type: "resize-br", cx: rect.x + rect.w,  cy: rect.y + rect.h },
+  const handles = [
+    { type: "resize-tl", cx: rect.x,         cy: rect.y          },
+    { type: "resize-tr", cx: rect.x + rect.w, cy: rect.y          },
+    { type: "resize-bl", cx: rect.x,          cy: rect.y + rect.h },
+    { type: "resize-br", cx: rect.x + rect.w, cy: rect.y + rect.h },
   ];
+
+  const cx = PANEL_W / 2;
+  const cy = panelH  / 2;
+
+  const guideLine = (style: React.CSSProperties) => (
+    <div style={{
+      position: "absolute", background: "#f0c040", opacity: 0.9,
+      pointerEvents: "none", zIndex: 10,
+      ...style,
+    }} />
+  );
 
   return (
     <div
       ref={containerRef}
       onMouseDown={onMouseDown}
       style={{
-        position: "relative",
-        width: PANEL_W,
-        height: panelH,
-        overflow: "hidden",
-        borderRadius: 6,
+        position: "relative", width: PANEL_W, height: panelH,
+        overflow: "hidden", borderRadius: 6,
         cursor: readOnly ? "default" : "crosshair",
-        userSelect: "none",
-        flexShrink: 0,
+        userSelect: "none", flexShrink: 0,
       }}
     >
       {/* Template — fundo */}
@@ -166,30 +209,40 @@ export default function CompositionEditor({
         crossOrigin="anonymous"
       />
 
-      {/* Vídeo bruto — em cima do template */}
+      {/* Vídeo bruto */}
       {videoFrameUrl && (
         <img
           src={videoFrameUrl}
           style={{
-            position: "absolute",
-            left: rect.x, top: rect.y,
+            position: "absolute", left: rect.x, top: rect.y,
             width: rect.w, height: rect.h,
-            objectFit: "cover",
-            pointerEvents: "none",
-            display: "block",
+            objectFit: "cover", pointerEvents: "none", display: "block",
           }}
         />
+      )}
+
+      {/* Guias de centralização */}
+      {!readOnly && guides.cx     && guideLine({ left: cx - 0.5, top: 0, width: 1, height: panelH })}
+      {!readOnly && guides.cy     && guideLine({ top: cy - 0.5, left: 0, height: 1, width: PANEL_W })}
+      {!readOnly && guides.left   && guideLine({ left: 0,          top: 0, width: 1, height: panelH })}
+      {!readOnly && guides.right  && guideLine({ left: PANEL_W - 1, top: 0, width: 1, height: panelH })}
+      {!readOnly && guides.top    && guideLine({ top: 0,           left: 0, height: 1, width: PANEL_W })}
+      {!readOnly && guides.bottom && guideLine({ top: panelH - 1,  left: 0, height: 1, width: PANEL_W })}
+
+      {/* Marcadores de centro (sempre visíveis, sutis) */}
+      {!readOnly && (
+        <>
+          <div style={{ position: "absolute", left: cx - 0.5, top: 0, width: 1, height: panelH, background: "rgba(255,255,255,0.12)", pointerEvents: "none" }} />
+          <div style={{ position: "absolute", top: cy - 0.5, left: 0, height: 1, width: PANEL_W, background: "rgba(255,255,255,0.12)", pointerEvents: "none" }} />
+        </>
       )}
 
       {/* Borda da área de overlay */}
       {!readOnly && (
         <div style={{
-          position: "absolute",
-          left: rect.x, top: rect.y,
+          position: "absolute", left: rect.x, top: rect.y,
           width: rect.w, height: rect.h,
-          border: "2px solid #7c6af7",
-          boxSizing: "border-box",
-          pointerEvents: "none",
+          border: "2px solid #7c6af7", boxSizing: "border-box", pointerEvents: "none",
         }} />
       )}
 
@@ -197,12 +250,9 @@ export default function CompositionEditor({
       {!readOnly && handles.map(h => (
         <div key={h.type} style={{
           position: "absolute",
-          left: h.cx - HANDLE / 2,
-          top:  h.cy - HANDLE / 2,
+          left: h.cx - HANDLE / 2, top: h.cy - HANDLE / 2,
           width: HANDLE, height: HANDLE,
-          background: "#7c6af7",
-          border: "2px solid #fff",
-          borderRadius: 2,
+          background: "#7c6af7", border: "2px solid #fff", borderRadius: 2,
           cursor: h.type.includes("br") || h.type.includes("tl") ? "nwse-resize" : "nesw-resize",
         }} />
       ))}

@@ -9,20 +9,25 @@ export type WsMessage = {
 };
 
 export function useJobSocket(onMessage: (msg: WsMessage) => void) {
-  const ref = useRef<WebSocket | null>(null);
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage; // sempre atualizado sem recriar o socket
 
   useEffect(() => {
     let ws: WebSocket;
     let closed = false;
 
     const connect = () => {
-      ws = new WebSocket("ws://localhost:8000/ws");
-      ref.current = ws;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${protocol}//localhost:8000/ws`);
+
       ws.onmessage = (e) => {
-        try { onMessage(JSON.parse(e.data)); } catch {}
+        try { onMessageRef.current(JSON.parse(e.data)); } catch {}
       };
+
+      ws.onerror = () => ws.close();
+
       ws.onclose = () => {
-        if (!closed) setTimeout(connect, 2000); // reconecta automaticamente
+        if (!closed) setTimeout(connect, 2000);
       };
     };
 
@@ -31,5 +36,5 @@ export function useJobSocket(onMessage: (msg: WsMessage) => void) {
       closed = true;
       ws?.close();
     };
-  }, []);
+  }, []); // sem dependências — socket criado uma única vez
 }

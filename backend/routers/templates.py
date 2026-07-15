@@ -2,6 +2,7 @@
 Router: CRUD de templates + upload do arquivo de fundo.
 """
 import shutil
+import re
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -11,6 +12,14 @@ from schemas import TemplateCreate, TemplateOut
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 TEMPLATES_DIR = Path(__file__).parent.parent / "storage" / "templates"
+
+_SAFE_FILENAME_RE = re.compile(r"[^\w\-.]")
+
+
+def _secure_filename(name: str) -> str:
+    name = Path(name).name
+    name = _SAFE_FILENAME_RE.sub("_", name)
+    return name[:200] or "template"
 
 
 @router.post("/", response_model=TemplateOut)
@@ -32,7 +41,10 @@ async def create_template(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    dest = TEMPLATES_DIR / file.filename
+    safe_name = _secure_filename(file.filename or "template")
+    dest = TEMPLATES_DIR / safe_name
+    if not str(dest.resolve()).startswith(str(TEMPLATES_DIR.resolve())):
+        raise HTTPException(400, "Nome de arquivo inválido")
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
@@ -62,7 +74,10 @@ def get_template_file(template_id: int, db: Session = Depends(get_db)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl or not Path(tpl.file_path).exists():
         raise HTTPException(404, "Arquivo não encontrado")
-    return FileResponse(tpl.file_path)
+    return FileResponse(
+        tpl.file_path,
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 @router.get("/{template_id}", response_model=TemplateOut)
