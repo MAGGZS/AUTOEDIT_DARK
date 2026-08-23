@@ -15,7 +15,10 @@ class ConnectionManager:
         self.active.append(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
+        # list.remove levanta ValueError se a conexão já saiu da lista (acontece
+        # quando o broadcast a removeu por erro antes do WebSocketDisconnect).
+        if ws in self.active:
+            self.active.remove(ws)
 
     async def broadcast(self, data: dict):
         dead = []
@@ -25,7 +28,8 @@ class ConnectionManager:
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self.active.remove(ws)
+            if ws in self.active:
+                self.active.remove(ws)
 
 
 manager = ConnectionManager()

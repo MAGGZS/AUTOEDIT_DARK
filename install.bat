@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo  AutoEdit - Script de Instalacao
+echo  FLAXY - Script de Instalacao
 echo ============================================
 
 echo.
@@ -33,6 +33,6 @@ cd ..
 echo.
 echo ============================================
 echo  Instalacao concluida!
-echo  Execute start.bat para iniciar o sistema.
+echo  Execute start.bat para iniciar o FLAXY.
 echo ============================================
 pause

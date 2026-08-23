@@ -16,7 +16,7 @@ env/
 *.sqlite
 *.sqlite3
 
-# Arquivos temporários do AutoEdit (uploads, outputs, logs)
+# Arquivos temporários do FLAXY (uploads, outputs, logs)
 backend/storage/uploads/
 backend/storage/output/
 backend/storage/logs/

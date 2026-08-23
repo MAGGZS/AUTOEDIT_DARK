@@ -185,7 +185,7 @@ export default function CompositionEditor({
 
   const guideLine = (style: React.CSSProperties) => (
     <div style={{
-      position: "absolute", background: "#f0c040", opacity: 0.9,
+      position: "absolute", background: "var(--warn)", opacity: 0.9,
       pointerEvents: "none", zIndex: 10,
       ...style,
     }} />
@@ -197,7 +197,7 @@ export default function CompositionEditor({
       onMouseDown={onMouseDown}
       style={{
         position: "relative", width: PANEL_W, height: panelH,
-        overflow: "hidden", borderRadius: 6,
+        overflow: "hidden", borderRadius: 12,
         cursor: readOnly ? "default" : "crosshair",
         userSelect: "none", flexShrink: 0,
       }}
@@ -242,7 +242,7 @@ export default function CompositionEditor({
         <div style={{
           position: "absolute", left: rect.x, top: rect.y,
           width: rect.w, height: rect.h,
-          border: "2px solid #7c6af7", boxSizing: "border-box", pointerEvents: "none",
+          border: "2px solid var(--purple)", boxSizing: "border-box", pointerEvents: "none",
         }} />
       )}
 
@@ -252,7 +252,7 @@ export default function CompositionEditor({
           position: "absolute",
           left: h.cx - HANDLE / 2, top: h.cy - HANDLE / 2,
           width: HANDLE, height: HANDLE,
-          background: "#7c6af7", border: "2px solid #fff", borderRadius: 2,
+          background: "var(--purple)", border: "2px solid #fff", borderRadius: 2,
           cursor: h.type.includes("br") || h.type.includes("tl") ? "nwse-resize" : "nesw-resize",
         }} />
       ))}

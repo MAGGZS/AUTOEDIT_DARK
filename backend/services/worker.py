@@ -3,6 +3,7 @@ Worker de processamento: consome jobs da fila e chama o composer.
 Usa store em memória para jobs/itens. Sem acesso ao banco de dados.
 """
 import asyncio
+import os
 import re
 from pathlib import Path
 from datetime import datetime
@@ -12,6 +13,12 @@ from ws_manager import manager
 import store
 
 _SAFE_NAME_RE = re.compile(r"[^\w\-.]")
+
+# FFmpeg satura CPU/GPU sozinho. Sem esse limite, disparar dois jobs em paralelo
+# faz os dois ficarem mais lentos que se rodassem em sequência — e, com NVENC,
+# pode estourar o número de sessões simultâneas da placa.
+MAX_CONCURRENT_RENDERS = int(os.getenv("FLAXY_MAX_CONCURRENT", "1"))
+_render_slot = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
 
 
 def _safe_stem(path: str) -> str:
@@ -46,7 +53,8 @@ def _process_item(item: dict, template: Template, loop: asyncio.AbstractEventLoo
 
     try:
         compose(template, item["input_path"], out_path,
-                progress_callback=on_progress, log_path=log_path)
+                progress_callback=on_progress, log_path=log_path,
+                overrides=item.get("overrides"))
         store.update_item(item["id"], status="done", output_path=out_path,
                           progress=100, log_path=log_path)
     except Exception as e:
@@ -75,11 +83,18 @@ async def run_job(job_id: int):
             return
 
         for item in job["items"]:
+            if store.is_canceled(job_id):
+                break
             if item["status"] != "queued":
                 continue
-            await asyncio.to_thread(_process_item, item, template, loop)
+            async with _render_slot:
+                await asyncio.to_thread(_process_item, item, template, loop)
 
-        # Atualiza status geral
+        if store.is_canceled(job_id):
+            store.update_job_status(job_id, "canceled")
+            return
+
+        # Status geral: só é "done" quando todo item terminou bem.
         final_items = store.job_view(job_id)["items"]
         statuses = {i["status"] for i in final_items}
         job_status = "done" if statuses <= {"done"} else "error"

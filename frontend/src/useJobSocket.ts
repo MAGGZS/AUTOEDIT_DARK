@@ -1,5 +1,6 @@
 // Hook para conexão WebSocket com o backend — recebe atualizações de progresso
 import { useEffect, useRef } from "react";
+import { WS_URL } from "./config";
 
 export type WsMessage = {
   job_id: number;
@@ -13,28 +14,44 @@ export function useJobSocket(onMessage: (msg: WsMessage) => void) {
   onMessageRef.current = onMessage; // sempre atualizado sem recriar o socket
 
   useEffect(() => {
-    let ws: WebSocket;
+    let ws: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
 
     const connect = () => {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${protocol}//localhost:8000/ws`);
+      const socket = new WebSocket(WS_URL);
+      ws = socket;
 
-      ws.onmessage = (e) => {
+      socket.onmessage = (e) => {
         try { onMessageRef.current(JSON.parse(e.data)); } catch {}
       };
 
-      ws.onerror = () => ws.close();
+      socket.onerror = () => {
+        if (socket.readyState === WebSocket.OPEN) socket.close();
+      };
 
-      ws.onclose = () => {
-        if (!closed) setTimeout(connect, 2000);
+      socket.onclose = () => {
+        if (!closed) retry = setTimeout(connect, 2000);
       };
     };
 
     connect();
+
     return () => {
       closed = true;
-      ws?.close();
+      if (retry) clearTimeout(retry);
+      const socket = ws;
+      if (!socket) return;
+      // Evita "closed before the connection is established" (StrictMode monta 2x):
+      // se ainda esta conectando, so fecha depois que abrir.
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.onmessage = null;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.onopen = () => socket.close();
+      } else if (socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
     };
   }, []); // sem dependências — socket criado uma única vez
 }

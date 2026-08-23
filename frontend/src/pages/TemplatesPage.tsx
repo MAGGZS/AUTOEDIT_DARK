@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
-import api from "../api";
+/**
+ * Templates — o fundo fixo e a área onde cada vídeo bruto será encaixado.
+ */
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import api, { errorMessage } from "../api";
+import { templateFileUrl } from "../config";
 import CompositionEditor from "../components/CompositionEditor";
+import Icon from "../ui/Icon";
+import { useToast } from "../ui/Toast";
 
 type Template = {
   id: number; name: string; file_path: string;
@@ -19,203 +26,358 @@ const DEFAULT: Omit<Template, "id" | "file_path"> = {
   duration_rule: "raw",
 };
 
-function Tag({ children }: { children: React.ReactNode }) {
-  return <span style={{ background: "var(--surface2)", border: "1px solid var(--border2)", borderRadius: 4, padding: "1px 6px", fontSize: 10, color: "var(--text2)" }}>{children}</span>;
-}
+const STEP_OPTIONS = [1, 10, 50];
 
-export default function TemplatesPage() {
+/** Presets das proporções que a maioria dos lotes usa. */
+const PRESETS = [
+  { label: "9:16", w: 1080, h: 1920 },
+  { label: "1:1",  w: 1080, h: 1080 },
+  { label: "4:5",  w: 1080, h: 1350 },
+  { label: "16:9", w: 1920, h: 1080 },
+];
+
+export default function TemplatesPage({ query = "" }: { query?: string }) {
+  const toast = useToast();
+  const [params, setParams] = useSearchParams();
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<Template> | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [step, setStep] = useState(10);
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<Template | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const load = () => api.get("/templates/").then(r => setTemplates(r.data));
+  const load = async () => {
+    try {
+      const r = await api.get("/templates/");
+      setTemplates(r.data);
+    } catch (err) {
+      toast.error(errorMessage(err, "Não foi possível carregar os templates"));
+    } finally {
+      setLoading(false);
+    }
+  };
   useEffect(() => { load(); }, []);
 
   const openNew = () => { setEditing({ ...DEFAULT }); setFile(null); setPreviewUrl(""); };
-  const openEdit = (t: Template) => { setEditing({ ...t }); setPreviewUrl(`http://localhost:8000/templates/file/${t.id}`); };
+  const openEdit = (t: Template) => { setEditing({ ...t }); setFile(null); setPreviewUrl(templateFileUrl(t.id)); };
+  const closeModal = () => { setEditing(null); setFile(null); setPreviewUrl(""); };
+
+  // O botão "+" da barra superior abre esta página já com o modal aberto.
+  useEffect(() => {
+    if (params.get("novo")) {
+      openNew();
+      params.delete("novo");
+      setParams(params, { replace: true });
+    }
+  }, [params, setParams]);
+
+  const pickFile = (f: File | undefined | null) => {
+    if (!f) return;
+    setFile(f);
+    setPreviewUrl(URL.createObjectURL(f));
+  };
 
   const save = async () => {
     if (!editing) return;
-    if (editing.id) {
-      await api.put(`/templates/${editing.id}`, {
-        name: editing.name, overlay_x: editing.overlay_x, overlay_y: editing.overlay_y,
-        overlay_w: editing.overlay_w, overlay_h: editing.overlay_h, fit_mode: editing.fit_mode,
-        output_w: editing.output_w, output_h: editing.output_h, output_format: editing.output_format,
-        video_bitrate: editing.video_bitrate, audio_source: editing.audio_source,
-        audio_mix_raw: editing.audio_mix_raw, audio_mix_template: editing.audio_mix_template,
-        duration_rule: editing.duration_rule,
-      });
-    } else {
-      if (!file) { alert("Selecione um arquivo de template."); return; }
-      const fd = new FormData();
-      Object.entries(editing).forEach(([k, v]) => { if (k !== "id" && k !== "file_path") fd.append(k, String(v)); });
-      fd.append("file", file);
-      await api.post("/templates/", fd, { headers: { "Content-Type": "multipart/form-data" } });
+
+    // Coerção defensiva: evita NaN/undefined/"" chegarem ao backend como Form fields
+    const int = (v: unknown, fallback: number) => {
+      const n = Math.round(Number(v));
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const float = (v: unknown, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const str = (v: unknown, fallback: string) => {
+      const s = typeof v === "string" ? v.trim() : "";
+      return s || fallback;
+    };
+
+    const payload = {
+      name: str(editing.name, ""),
+      overlay_x: int(editing.overlay_x, 0),
+      overlay_y: int(editing.overlay_y, 0),
+      overlay_w: int(editing.overlay_w, 540),
+      overlay_h: int(editing.overlay_h, 960),
+      fit_mode: str(editing.fit_mode, "cover"),
+      output_w: int(editing.output_w, 1080),
+      output_h: int(editing.output_h, 1920),
+      output_format: str(editing.output_format, "mp4"),
+      video_bitrate: str(editing.video_bitrate, "8M"),
+      audio_source: str(editing.audio_source, "raw"),
+      audio_mix_raw: float(editing.audio_mix_raw, 1.0),
+      audio_mix_template: float(editing.audio_mix_template, 0.5),
+      duration_rule: str(editing.duration_rule, "raw"),
+    };
+
+    if (!payload.name) { toast.error("Informe um nome para o template."); return; }
+    if (!editing.id && !file) { toast.error("Selecione um arquivo de fundo."); return; }
+
+    setSaving(true);
+    try {
+      if (editing.id) {
+        await api.put(`/templates/${editing.id}`, payload);
+        toast.success(`Template "${payload.name}" atualizado.`);
+      } else {
+        const fd = new FormData();
+        Object.entries(payload).forEach(([k, v]) => fd.append(k, String(v)));
+        fd.append("file", file!);
+        // Sem Content-Type manual: o browser precisa gerar o boundary do multipart
+        await api.post("/templates/", fd);
+        toast.success(`Template "${payload.name}" criado.`);
+      }
+      closeModal();
+      load();
+    } catch (err) {
+      toast.error(errorMessage(err, "Falha ao salvar o template"));
+    } finally {
+      setSaving(false);
     }
-    setEditing(null);
-    load();
   };
 
-  const del = async (id: number) => {
-    if (!confirm("Excluir template?")) return;
-    await api.delete(`/templates/${id}`);
-    load();
+  const del = async (t: Template) => {
+    setConfirmDelete(null);
+    try {
+      await api.delete(`/templates/${t.id}`);
+      setTemplates(prev => prev.filter(x => x.id !== t.id));
+      toast.success(`"${t.name}" excluído.`);
+    } catch (err) {
+      toast.error(errorMessage(err, "Falha ao excluir"));
+    }
   };
 
-  const dup = async (id: number) => { await api.post(`/templates/${id}/duplicate`); load(); };
-  const set = (k: string, v: any) => setEditing(e => e ? { ...e, [k]: v } : e);
+  const dup = async (t: Template) => {
+    try {
+      await api.post(`/templates/${t.id}/duplicate`);
+      toast.success(`Cópia de "${t.name}" criada.`);
+      load();
+    } catch (err) {
+      toast.error(errorMessage(err, "Falha ao duplicar"));
+    }
+  };
+
+  const set = (k: string, v: unknown) => setEditing(e => (e ? { ...e, [k]: v } : e));
+  const num = (k: string) => Number((editing as Record<string, unknown> | null)?.[k] ?? 0);
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? templates.filter(t => t.name.toLowerCase().includes(q)) : templates;
+  }, [templates, query]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-
-      {/* Topbar */}
-      <div className="topbar">
-        <span style={{ fontWeight: 600, fontSize: 14 }}>Templates</span>
-        <button className="btn btn-primary" style={{ marginLeft: "auto" }} onClick={openNew}>+ Novo Template</button>
+    <div className="page">
+      <div className="section-head" style={{ paddingTop: 2 }}>
+        <span className="section-title">Templates</span>
+        <span className="section-sub">
+          {loading ? "carregando…" : `${shown.length} de ${templates.length}`}
+        </span>
+        <span className="spacer" />
+        <button className="btn btn-ghost btn-sm" onClick={load} title="Recarregar">
+          <Icon name="refresh" size={13} />
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={openNew}>
+          <Icon name="plus" size={13} /> Novo template
+        </button>
       </div>
 
-      {/* Grid */}
-      <div className="content-scroll">
-        {templates.length === 0 ? (
+      {!loading && templates.length === 0 ? (
+        <div className="panel">
           <div className="empty">
-            <div style={{ fontSize: 32, marginBottom: 8 }}>🎬</div>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Nenhum template ainda</div>
-            <div style={{ fontSize: 12 }}>Crie um template para começar</div>
+            <div className="empty-icon"><Icon name="layers" size={22} /></div>
+            <div className="empty-title">Nenhum template ainda</div>
+            <div className="empty-hint">
+              Um template é o fundo fixo mais a área onde cada vídeo bruto será encaixado.
+              É o primeiro passo — sem ele não dá para gerar nada.
+            </div>
+            <button className="btn btn-primary" onClick={openNew}>
+              <Icon name="plus" size={14} /> Criar o primeiro template
+            </button>
           </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
-            {templates.map(t => (
-              <div key={t.id} className="card" style={{ padding: 0, overflow: "hidden" }}>
-                <div style={{ position: "relative", width: "100%", aspectRatio: "9/16", background: "var(--surface2)", overflow: "hidden" }}>
-                  <img src={`http://localhost:8000/templates/file/${t.id}`} alt={t.name}
-                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                  <div style={{
-                    position: "absolute",
-                    left: `${(t.overlay_x / t.output_w) * 100}%`,
-                    top: `${(t.overlay_y / t.output_h) * 100}%`,
-                    width: `${(t.overlay_w / t.output_w) * 100}%`,
-                    height: `${(t.overlay_h / t.output_h) * 100}%`,
-                    border: "2px solid var(--accent)", background: "rgba(124,106,247,0.15)", pointerEvents: "none",
-                  }} />
-                </div>
-                <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
-                  <div style={{ fontWeight: 600, fontSize: 12 }}>{t.name}</div>
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                    <Tag>{t.output_w}×{t.output_h}</Tag>
-                    <Tag>{t.output_format.toUpperCase()}</Tag>
-                    <Tag>{t.fit_mode}</Tag>
-                  </div>
-                  <div style={{ display: "flex", gap: 5 }}>
-                    <button className="btn btn-sm" onClick={() => openEdit(t)}>✏ Editar</button>
-                    <button className="btn btn-sm" onClick={() => dup(t.id)}>⧉</button>
-                    <button className="btn btn-sm btn-danger" onClick={() => del(t.id)}>✕</button>
-                  </div>
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="panel">
+          <div className="empty">
+            <div className="empty-icon"><Icon name="search" size={20} /></div>
+            <div className="empty-title">Nada com “{query}”</div>
+          </div>
+        </div>
+      ) : (
+        <div className="card-grid">
+          {shown.map(t => (
+            <div key={t.id} className="media-card" onClick={() => openEdit(t)}>
+              <div className="thumb">
+                <img src={templateFileUrl(t.id)} alt=""
+                  onError={e => { (e.target as HTMLImageElement).style.visibility = "hidden"; }} />
+                {/* Retângulo mostrando onde o vídeo bruto entra */}
+                <div style={{
+                  position: "absolute",
+                  left: `${(t.overlay_x / t.output_w) * 100}%`,
+                  top: `${(t.overlay_y / t.output_h) * 100}%`,
+                  width: `${(t.overlay_w / t.output_w) * 100}%`,
+                  height: `${(t.overlay_h / t.output_h) * 100}%`,
+                  border: "1.5px solid var(--purple)",
+                  background: "var(--purple-soft)",
+                  pointerEvents: "none",
+                }} />
+              </div>
+              <div className="card-body">
+                <div className="card-title" title={t.name}>{t.name}</div>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                  <span className="chip">{t.output_w}×{t.output_h}</span>
+                  <span className="chip chip-purple">{t.output_format.toUpperCase()}</span>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+              <div className="card-actions" onClick={e => e.stopPropagation()}>
+                <button className="btn btn-xs" onClick={() => openEdit(t)}>
+                  <Icon name="edit" size={12} /> Editar
+                </button>
+                <button className="btn btn-xs" onClick={() => dup(t)} title="Duplicar">
+                  <Icon name="copy" size={12} />
+                </button>
+                <button className="btn btn-xs btn-danger" style={{ marginLeft: "auto" }}
+                  onClick={() => setConfirmDelete(t)} title="Excluir">
+                  <Icon name="trash" size={12} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* Modal */}
+      {/* ------------------------------------------------------- modal de edição */}
       {editing && (
-        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setEditing(null); }}>
-          <div className="modal" style={{ width: "min(960px, 95vw)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-              <h2 style={{ fontSize: 15, fontWeight: 700 }}>{editing.id ? "Editar" : "Novo"} Template</h2>
-              <button className="btn btn-icon" onClick={() => setEditing(null)}>✕</button>
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) closeModal(); }}>
+          <div className="modal" style={{ width: "min(1000px, 95vw)" }}>
+            <div className="modal-header">
+              <div>
+                <div className="modal-title">{editing.id ? "Editar template" : "Novo template"}</div>
+                <div style={{ fontSize: 11, color: "var(--text-3)" }}>
+                  Defina o fundo, a resolução e onde o vídeo bruto entra
+                </div>
+              </div>
+              <button className="btn btn-ghost btn-icon" onClick={closeModal} aria-label="Fechar">
+                <Icon name="close" size={15} />
+              </button>
             </div>
 
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-              {/* Formulário */}
-              <div style={{ flex: "1 1 260px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div className="modal-body" style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
+
+              <div style={{ flex: "1 1 280px", display: "flex", flexDirection: "column", gap: 14, minWidth: 260 }}>
                 <div>
-                  <label>Nome</label>
-                  <input type="text" value={editing.name || ""} onChange={e => set("name", e.target.value)} placeholder="Ex: Reels 9:16" />
+                  <label htmlFor="tpl-name">Nome</label>
+                  <input id="tpl-name" type="text" value={editing.name || ""} autoFocus
+                    onChange={e => set("name", e.target.value)} placeholder="Ex: Reels 9:16" />
                 </div>
 
                 {!editing.id && (
                   <div>
-                    <label>Arquivo de fundo (vídeo ou imagem)</label>
-                    <input type="file" accept="video/*,image/*" onChange={e => {
-                      const f = e.target.files?.[0];
-                      if (f) { setFile(f); setPreviewUrl(URL.createObjectURL(f)); }
-                    }} />
+                    <label>Arquivo de fundo</label>
+                    <div
+                      className={"dropzone" + (dragOver ? " over" : "")}
+                      style={{ padding: "18px 12px", cursor: "pointer" }}
+                      onClick={() => fileInputRef.current?.click()}
+                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                      onDragLeave={() => setDragOver(false)}
+                      onDrop={e => {
+                        e.preventDefault(); setDragOver(false);
+                        pickFile(e.dataTransfer.files?.[0]);
+                      }}
+                    >
+                      <div className="dropzone-icon"><Icon name="upload" size={20} /></div>
+                      <div className="dropzone-title" style={{ fontSize: 12 }}>
+                        {file ? file.name : "Arraste um vídeo ou imagem"}
+                      </div>
+                      <div className="dropzone-hint" style={{ fontSize: 11 }}>
+                        {file ? "Clique para trocar" : "ou clique para escolher"}
+                      </div>
+                    </div>
+                    <input ref={fileInputRef} type="file" accept="video/*,image/*"
+                      style={{ display: "none" }}
+                      onChange={e => { pickFile(e.target.files?.[0]); e.target.value = ""; }} />
                   </div>
                 )}
 
                 <hr className="divider" />
-                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Resolução de saída (9:16)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <div>
-                    <label>Largura (px)</label>
-                    <input type="number" value={(editing as any).output_w ?? 1080} onChange={e => {
-                      const w = parseInt(e.target.value) || 1080;
-                      set("output_w", w); set("output_h", Math.round(w * 16 / 9));
-                    }} />
+                <div>
+                  <label>Resolução de saída</label>
+                  <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                    {PRESETS.map(p => {
+                      const on = num("output_w") === p.w && num("output_h") === p.h;
+                      return (
+                        <button key={p.label} className={"btn btn-xs" + (on ? " btn-soft" : "")}
+                          onClick={() => { set("output_w", p.w); set("output_h", p.h); }}>
+                          {p.label}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div>
-                    <label>Altura — calculada</label>
-                    <input type="number" value={(editing as any).output_h ?? 1920} readOnly style={{ opacity: 0.5, cursor: "not-allowed" }} />
+                  <div className="field-row">
+                    <input type="number" aria-label="Largura" value={num("output_w") || 1080}
+                      onChange={e => set("output_w", parseInt(e.target.value) || 1080)} />
+                    <input type="number" aria-label="Altura" value={num("output_h") || 1920}
+                      onChange={e => set("output_h", parseInt(e.target.value) || 1920)} />
                   </div>
                 </div>
 
                 <hr className="divider" />
-                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Área do vídeo bruto</div>
-
-                {/* Passo */}
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontSize: 11, color: "var(--text3)" }}>Passo:</span>
-                  {[1, 10, 50].map(s => (
-                    <button key={s} className="btn btn-sm"
-                      style={{ borderColor: step === s ? "var(--accent)" : undefined, color: step === s ? "var(--accent)" : undefined }}
-                      onClick={() => setStep(s)}>{s}px</button>
-                  ))}
-                </div>
-
-                {/* Blocos Posição + Tamanho */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  {/* Posição */}
-                  <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 8, textAlign: "center" }}>Posição</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 30px)", gridTemplateRows: "repeat(3, 30px)", gap: 3, justifyContent: "center" }}>
-                      <div />
-                      <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0, justifyContent: "center", fontSize: 11 }}
-                        onClick={() => set("overlay_y", Math.max(0, (editing.overlay_y ?? 0) - step))}>▲</button>
-                      <div />
-                      <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0, justifyContent: "center", fontSize: 11 }}
-                        onClick={() => set("overlay_x", Math.max(0, (editing.overlay_x ?? 0) - step))}>◀</button>
-                      <div style={{ width: 30, height: 30, background: "var(--border)", borderRadius: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 8, lineHeight: 1.4 }}>
-                        <span style={{ color: "var(--text2)" }}>x{editing.overlay_x ?? 0}</span>
-                        <span style={{ color: "var(--text2)" }}>y{editing.overlay_y ?? 0}</span>
-                      </div>
-                      <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0, justifyContent: "center", fontSize: 11 }}
-                        onClick={() => set("overlay_x", (editing.overlay_x ?? 0) + step)}>▶</button>
-                      <div />
-                      <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0, justifyContent: "center", fontSize: 11 }}
-                        onClick={() => set("overlay_y", (editing.overlay_y ?? 0) + step)}>▼</button>
-                      <div />
-                    </div>
+                <div>
+                  <label>Área do vídeo bruto</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                    <span style={{ fontSize: 11, color: "var(--text-3)" }}>Passo</span>
+                    {STEP_OPTIONS.map(s => (
+                      <button key={s} className={"btn btn-xs" + (step === s ? " btn-soft" : "")}
+                        onClick={() => setStep(s)}>{s}px</button>
+                    ))}
                   </div>
 
-                  {/* Tamanho */}
-                  <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 8, textAlign: "center" }}>Tamanho</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div className="field-row">
+                    <div className="tile">
+                      <div style={{ fontSize: 10, color: "var(--text-3)", textAlign: "center" }}>Posição</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 30px)", gap: 3, justifyContent: "center" }}>
+                        <div />
+                        <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0 }} title="Subir"
+                          onClick={() => set("overlay_y", Math.max(0, num("overlay_y") - step))}>▲</button>
+                        <div />
+                        <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0 }} title="Esquerda"
+                          onClick={() => set("overlay_x", Math.max(0, num("overlay_x") - step))}>◀</button>
+                        <div style={{
+                          width: 30, height: 30, background: "var(--surface-3)", borderRadius: 7,
+                          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                          fontSize: 8, lineHeight: 1.3, color: "var(--text-2)",
+                        }}>
+                          <span>x{num("overlay_x")}</span>
+                          <span>y{num("overlay_y")}</span>
+                        </div>
+                        <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0 }} title="Direita"
+                          onClick={() => set("overlay_x", num("overlay_x") + step)}>▶</button>
+                        <div />
+                        <button className="btn btn-icon" style={{ width: 30, height: 30, padding: 0 }} title="Descer"
+                          onClick={() => set("overlay_y", num("overlay_y") + step)}>▼</button>
+                        <div />
+                      </div>
+                    </div>
+
+                    <div className="tile">
+                      <div style={{ fontSize: 10, color: "var(--text-3)", textAlign: "center" }}>Tamanho</div>
                       {(["overlay_w", "overlay_h"] as const).map(key => (
                         <div key={key}>
-                          <div style={{ fontSize: 9, color: "var(--text3)", marginBottom: 3 }}>{key === "overlay_w" ? "Largura" : "Altura"}</div>
+                          <div style={{ fontSize: 9, color: "var(--text-3)", marginBottom: 3 }}>
+                            {key === "overlay_w" ? "Largura" : "Altura"}
+                          </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                            <button className="btn btn-icon" style={{ width: 26, height: 26, padding: 0, justifyContent: "center" }}
-                              onClick={() => set(key, Math.max(10, (editing as any)[key] - step))}>−</button>
-                            <div style={{ flex: 1, textAlign: "center", background: "var(--border)", borderRadius: 4, padding: "3px 0", fontSize: 11, color: "var(--text)" }}>
-                              {(editing as any)[key] ?? 0}
-                            </div>
-                            <button className="btn btn-icon" style={{ width: 26, height: 26, padding: 0, justifyContent: "center" }}
-                              onClick={() => set(key, (editing as any)[key] + step)}>+</button>
+                            <button className="btn btn-icon" style={{ width: 26, height: 26, padding: 0 }}
+                              onClick={() => set(key, Math.max(10, num(key) - step))}>−</button>
+                            <div style={{
+                              flex: 1, textAlign: "center", background: "var(--surface-3)",
+                              borderRadius: 6, padding: "3px 0", fontSize: 11,
+                            }}>{num(key)}</div>
+                            <button className="btn btn-icon" style={{ width: 26, height: 26, padding: 0 }}
+                              onClick={() => set(key, num(key) + step)}>+</button>
                           </div>
                         </div>
                       ))}
@@ -224,61 +386,118 @@ export default function TemplatesPage() {
                 </div>
 
                 <hr className="divider" />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <div><label>Modo encaixe</label>
-                    <select value={editing.fit_mode} onChange={e => set("fit_mode", e.target.value)}>
-                      <option value="cover">Cover</option>
-                      <option value="contain">Contain</option>
+                <div className="field-row">
+                  <div>
+                    <label htmlFor="tpl-fit">Encaixe padrão</label>
+                    <select id="tpl-fit" value={editing.fit_mode} onChange={e => set("fit_mode", e.target.value)}>
+                      <option value="cover">Cover — preenche e corta</option>
+                      <option value="contain">Contain — cabe inteiro</option>
                     </select>
                   </div>
-                  <div><label>Formato</label>
-                    <select value={editing.output_format} onChange={e => set("output_format", e.target.value)}>
+                  <div>
+                    <label htmlFor="tpl-fmt">Formato</label>
+                    <select id="tpl-fmt" value={editing.output_format} onChange={e => set("output_format", e.target.value)}>
                       <option value="mp4">MP4</option>
                       <option value="mov">MOV</option>
                     </select>
                   </div>
-                  <div><label>Bitrate</label>
-                    <input type="text" value={editing.video_bitrate || "8M"} onChange={e => set("video_bitrate", e.target.value)} />
+                  <div>
+                    <label htmlFor="tpl-br">Bitrate</label>
+                    <input id="tpl-br" type="text" value={editing.video_bitrate || "8M"}
+                      onChange={e => set("video_bitrate", e.target.value)} />
                   </div>
-                  <div><label>Duração</label>
-                    <select value={editing.duration_rule} onChange={e => set("duration_rule", e.target.value)}>
-                      <option value="raw">Vídeo bruto</option>
-                      <option value="template">Template</option>
-                      <option value="loop_template">Loop template</option>
+                  <div>
+                    <label htmlFor="tpl-dur">Duração</label>
+                    <select id="tpl-dur" value={editing.duration_rule} onChange={e => set("duration_rule", e.target.value)}>
+                      <option value="raw">Do vídeo bruto</option>
+                      <option value="template">Do template</option>
+                      <option value="loop_template">Template em loop</option>
                     </select>
                   </div>
-                  <div><label>Áudio</label>
-                    <select value={editing.audio_source} onChange={e => set("audio_source", e.target.value)}>
-                      <option value="raw">Vídeo bruto</option>
-                      <option value="template">Template</option>
-                      <option value="both">Ambos (mix)</option>
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <label htmlFor="tpl-audio">Áudio</label>
+                    <select id="tpl-audio" value={editing.audio_source} onChange={e => set("audio_source", e.target.value)}>
+                      <option value="raw">Do vídeo bruto</option>
+                      <option value="template">Do template</option>
+                      <option value="both">Mixar os dois</option>
                     </select>
                   </div>
-                </div>
-
-                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                  <button className="btn btn-primary" onClick={save}>Salvar</button>
-                  <button className="btn" onClick={() => setEditing(null)}>Cancelar</button>
+                  {editing.audio_source === "both" && (
+                    <>
+                      <div>
+                        <label htmlFor="tpl-mix-raw">Volume do bruto</label>
+                        <input id="tpl-mix-raw" type="number" min={0} max={1} step={0.1}
+                          value={editing.audio_mix_raw ?? 1}
+                          onChange={e => set("audio_mix_raw", Number(e.target.value))} />
+                      </div>
+                      <div>
+                        <label htmlFor="tpl-mix-tpl">Volume do template</label>
+                        <input id="tpl-mix-tpl" type="number" min={0} max={1} step={0.1}
+                          value={editing.audio_mix_template ?? 0.5}
+                          onChange={e => set("audio_mix_template", Number(e.target.value))} />
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
-              {/* Editor visual */}
-              {previewUrl && (
-                <div style={{ flex: "0 0 auto" }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>Editor visual</div>
-                  <p style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>Arraste a caixa para reposicionar.</p>
-                  <CompositionEditor
-                    templateUrl={previewUrl}
-                    outputW={editing.output_w || 1080} outputH={editing.output_h || 1920}
-                    overlayX={editing.overlay_x ?? 0} overlayY={editing.overlay_y ?? 0}
-                    overlayW={editing.overlay_w || 540} overlayH={editing.overlay_h || 960}
-                    onChange={(x, y, w, h) => { set("overlay_x", x); set("overlay_y", y); set("overlay_w", w); set("overlay_h", h); }}
-                  />
-                  <div style={{ marginTop: 6, fontSize: 10, color: "var(--text3)" }}>
-                    x:{editing.overlay_x} y:{editing.overlay_y} · {editing.overlay_w}×{editing.overlay_h}px
+              <div style={{ flex: "0 0 auto" }}>
+                <label>Editor visual</label>
+                {previewUrl ? (
+                  <>
+                    <CompositionEditor
+                      templateUrl={previewUrl}
+                      outputW={num("output_w") || 1080} outputH={num("output_h") || 1920}
+                      overlayX={num("overlay_x")} overlayY={num("overlay_y")}
+                      overlayW={num("overlay_w") || 540} overlayH={num("overlay_h") || 960}
+                      onChange={(x, y, w, h) => {
+                        set("overlay_x", x); set("overlay_y", y);
+                        set("overlay_w", w); set("overlay_h", h);
+                      }}
+                    />
+                    <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-3)" }}>
+                      Arraste a caixa · alças nos cantos redimensionam<br />
+                      x:{num("overlay_x")} y:{num("overlay_y")} · {num("overlay_w")}×{num("overlay_h")}px
+                    </div>
+                  </>
+                ) : (
+                  <div className="empty" style={{ minHeight: 220, width: 300 }}>
+                    <div className="empty-icon"><Icon name="film" size={20} /></div>
+                    <div className="empty-hint">Escolha um arquivo de fundo para abrir o editor</div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn" onClick={closeModal}>Cancelar</button>
+              <button className="btn btn-primary" onClick={save} disabled={saving}>
+                <Icon name="check" size={14} /> {saving ? "Salvando…" : "Salvar template"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------ confirmação de exclusão */}
+      {confirmDelete && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setConfirmDelete(null); }}>
+          <div className="modal" style={{ width: "min(420px, 92vw)" }}>
+            <div className="modal-header">
+              <div className="modal-title">Excluir template</div>
+            </div>
+            <div className="modal-body" style={{ fontSize: 13, color: "var(--text-2)" }}>
+              Excluir <strong style={{ color: "var(--text)" }}>{confirmDelete.name}</strong> e o
+              arquivo de fundo dele?
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--err)" }}>
+                Vídeos já gerados continuam nos Resultados. Esta ação não pode ser desfeita.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setConfirmDelete(null)}>Cancelar</button>
+              <button className="btn btn-danger" onClick={() => del(confirmDelete)}>
+                <Icon name="trash" size={14} /> Excluir
+              </button>
             </div>
           </div>
         </div>

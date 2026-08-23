@@ -4,6 +4,7 @@ Router: CRUD de templates + upload do arquivo de fundo.
 import shutil
 import re
 from pathlib import Path
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -12,17 +13,55 @@ from schemas import TemplateCreate, TemplateOut
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 TEMPLATES_DIR = Path(__file__).parent.parent / "storage" / "templates"
+TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 _SAFE_FILENAME_RE = re.compile(r"[^\w\-.]")
+ALLOWED_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi",
+                    ".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-def _secure_filename(name: str) -> str:
-    name = Path(name).name
-    name = _SAFE_FILENAME_RE.sub("_", name)
-    return name[:200] or "template"
+def _unique_filename(name: str) -> str:
+    """
+    Gera um nome de arquivo único e seguro.
+
+    Preserva o nome original para o usuário reconhecer o arquivo em disco, mas
+    acrescenta um sufixo aleatório: sem ele, dois templates enviados com o mesmo
+    nome de arquivo se sobrescrevem e o primeiro template passa a exibir o fundo
+    do segundo.
+    """
+    original = Path(name).name
+    suffix = Path(original).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        raise HTTPException(400, f"Formato não suportado: {suffix or 'sem extensão'}")
+    stem = _SAFE_FILENAME_RE.sub("_", Path(original).stem)[:80] or "template"
+    return f"{stem}_{uuid4().hex[:8]}{suffix}"
 
 
-@router.post("/", response_model=TemplateOut)
+def _resolve_inside(directory: Path, filename: str) -> Path:
+    """Resolve filename dentro de directory, barrando path traversal."""
+    dest = (directory / filename).resolve()
+    if not str(dest).startswith(str(directory.resolve())):
+        raise HTTPException(400, "Nome de arquivo inválido")
+    return dest
+
+
+def _delete_file_if_unused(db: Session, file_path: str, exclude_id: int | None = None):
+    """
+    Remove o arquivo de fundo do disco, mas só se nenhum outro template ainda
+    apontar para ele. Sem essa checagem, apagar um template deixaria arquivos
+    órfãos acumulando em storage/templates.
+    """
+    query = db.query(Template).filter(Template.file_path == file_path)
+    if exclude_id is not None:
+        query = query.filter(Template.id != exclude_id)
+    if query.count():
+        return
+    path = Path(file_path)
+    if path.exists() and str(path.resolve()).startswith(str(TEMPLATES_DIR.resolve())):
+        path.unlink(missing_ok=True)
+
+
+@router.post("/", response_model=TemplateOut, status_code=201)
 async def create_template(
     name: str = Form(...),
     overlay_x: int = Form(0),
@@ -41,10 +80,7 @@ async def create_template(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    safe_name = _secure_filename(file.filename or "template")
-    dest = TEMPLATES_DIR / safe_name
-    if not str(dest.resolve()).startswith(str(TEMPLATES_DIR.resolve())):
-        raise HTTPException(400, "Nome de arquivo inválido")
+    dest = _resolve_inside(TEMPLATES_DIR, _unique_filename(file.filename or "template"))
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
@@ -65,7 +101,7 @@ async def create_template(
 
 @router.get("/", response_model=list[TemplateOut])
 def list_templates(db: Session = Depends(get_db)):
-    return db.query(Template).all()
+    return db.query(Template).order_by(Template.created_at.desc()).all()
 
 
 @router.get("/file/{template_id}")
@@ -105,18 +141,31 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
+    file_path = tpl.file_path
     db.delete(tpl)
     db.commit()
+    _delete_file_if_unused(db, file_path)
     return {"ok": True}
 
 
-@router.post("/{template_id}/duplicate", response_model=TemplateOut)
+@router.post("/{template_id}/duplicate", response_model=TemplateOut, status_code=201)
 def duplicate_template(template_id: int, db: Session = Depends(get_db)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
+
+    # Copia o arquivo em vez de compartilhar o caminho: com o path compartilhado,
+    # apagar a cópia removeria o fundo do template original.
+    source = Path(tpl.file_path)
+    if source.exists():
+        dest = _resolve_inside(TEMPLATES_DIR, _unique_filename(source.name))
+        shutil.copy2(source, dest)
+        new_path = str(dest)
+    else:
+        new_path = tpl.file_path
+
     new_tpl = Template(
-        name=f"{tpl.name} (cópia)", file_path=tpl.file_path,
+        name=f"{tpl.name} (cópia)", file_path=new_path,
         overlay_x=tpl.overlay_x, overlay_y=tpl.overlay_y,
         overlay_w=tpl.overlay_w, overlay_h=tpl.overlay_h,
         fit_mode=tpl.fit_mode, output_w=tpl.output_w, output_h=tpl.output_h,

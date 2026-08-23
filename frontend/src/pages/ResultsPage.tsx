@@ -1,155 +1,225 @@
-import { useEffect, useState } from "react";
-import api from "../api";
+/**
+ * Resultados — conferir, baixar e limpar os vídeos gerados.
+ */
+import { useEffect, useMemo, useState } from "react";
+import api, { errorMessage } from "../api";
+import { formatBytes, formatDate, outputUrl, outputZipUrl } from "../config";
+import Icon from "../ui/Icon";
+import { useToast } from "../ui/Toast";
 
-type ConfirmState = { files: string[] } | null;
+type OutputFile = { name: string; size_bytes: number; modified_at: string };
 
-function ConfirmModal({ files, onConfirm, onCancel }: {
-  files: string[];
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 1000,
-      background: "rgba(0,0,0,0.6)", display: "flex",
-      alignItems: "center", justifyContent: "center",
-    }} onClick={onCancel}>
-      <div style={{
-        background: "var(--surface)", border: "1px solid var(--border)",
-        borderRadius: 10, padding: "24px 28px", minWidth: 320, maxWidth: 420,
-        display: "flex", flexDirection: "column", gap: 16,
-      }} onClick={e => e.stopPropagation()}>
-        <div style={{ fontSize: 15, fontWeight: 600 }}>
-          🗑 Confirmar exclusão
-        </div>
-        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.5 }}>
-          {files.length === 1
-            ? <>Tem certeza que deseja excluir <strong style={{ color: "var(--text1)" }}>{files[0]}</strong>?</>
-            : <>Tem certeza que deseja excluir <strong style={{ color: "var(--text1)" }}>{files.length} vídeos</strong> selecionados?</>
-          }
-          <div style={{ marginTop: 6, fontSize: 11, color: "var(--red)" }}>Esta ação não pode ser desfeita.</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="btn btn-sm" onClick={onCancel}>Cancelar</button>
-          <button className="btn btn-sm btn-danger" onClick={onConfirm}>Excluir</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function ResultsPage() {
-  const [files, setFiles] = useState<string[]>([]);
+export default function ResultsPage({ query = "" }: { query?: string }) {
+  const toast = useToast();
+  const [files, setFiles] = useState<OutputFile[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [confirm, setConfirm] = useState<string[] | null>(null);
+  const [preview, setPreview] = useState<OutputFile | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const load = () => api.get("/output").then(r => setFiles(r.data.files));
+  const load = async () => {
+    try {
+      const r = await api.get("/output");
+      // `items` traz tamanho e data; `files` é o formato antigo, só nomes. Aceitar
+      // os dois deixa a página funcionar mesmo com um backend ainda não atualizado.
+      const items: OutputFile[] = r.data.items
+        ?? (r.data.files ?? []).map((name: string) => ({ name, size_bytes: 0, modified_at: "" }));
+      setFiles(items);
+      setSelected(prev => new Set([...prev].filter(n => items.some(i => i.name === n))));
+    } catch (err) {
+      toast.error(errorMessage(err, "Não foi possível listar os resultados"));
+    } finally {
+      setLoading(false);
+    }
+  };
   useEffect(() => { load(); }, []);
 
-  const toggle = (f: string) => setSelected(prev => {
-    const s = new Set(prev); s.has(f) ? s.delete(f) : s.add(f); return s;
-  });
-  const toggleAll = () => setSelected(selected.size === files.length ? new Set() : new Set(files));
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? files.filter(f => f.name.toLowerCase().includes(q)) : files;
+  }, [files, query]);
 
-  const execDelete = async (toDelete: string[]) => {
-    await Promise.all(toDelete.map(f => api.delete(`/output/${encodeURIComponent(f)}`)));
-    setFiles(prev => prev.filter(f => !toDelete.includes(f)));
-    setSelected(prev => { const s = new Set(prev); toDelete.forEach(f => s.delete(f)); return s; });
+  const toggle = (name: string) => setSelected(prev => {
+    const s = new Set(prev);
+    if (s.has(name)) s.delete(name); else s.add(name);
+    return s;
+  });
+  const toggleAll = () =>
+    setSelected(selected.size === shown.length ? new Set() : new Set(shown.map(f => f.name)));
+
+  const execDelete = async (names: string[]) => {
     setConfirm(null);
+    try {
+      await Promise.all(names.map(n => api.delete(`/output/${encodeURIComponent(n)}`)));
+      setFiles(prev => prev.filter(f => !names.includes(f.name)));
+      setSelected(prev => {
+        const s = new Set(prev);
+        names.forEach(n => s.delete(n));
+        return s;
+      });
+      toast.success(`${names.length} vídeo(s) excluídos.`);
+    } catch (err) {
+      toast.error(errorMessage(err, "Falha ao excluir"));
+    }
   };
 
-  const downloadZip = () =>
-    window.open(`http://localhost:8000/output-zip?filenames=${encodeURIComponent(Array.from(selected).join(","))}`);
+  const downloadZip = () => {
+    if (!selected.size) return;
+    window.open(outputZipUrl([...selected]));
+  };
+
+  const totalSize = files.reduce((sum, f) => sum + f.size_bytes, 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {confirm && (
-        <ConfirmModal
-          files={confirm.files}
-          onConfirm={() => execDelete(confirm.files)}
-          onCancel={() => setConfirm(null)}
-        />
-      )}
-
-      <div className="topbar">
-        <span style={{ fontWeight: 600, fontSize: 14 }}>Resultados</span>
-        <span style={{ fontSize: 12, color: "var(--text2)" }}>{files.length} vídeo(s)</span>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn btn-sm" onClick={load}>↻</button>
-          {files.length > 0 && (
-            <button className="btn btn-sm" onClick={toggleAll}>
-              {selected.size === files.length ? "Desmarcar" : "Todos"}
-            </button>
-          )}
-          <button className="btn btn-sm btn-primary" onClick={downloadZip} disabled={selected.size === 0}>
-            ⬇ ZIP ({selected.size})
+    <div className="page">
+      <div className="section-head" style={{ paddingTop: 2 }}>
+        <span className="section-title">Resultados</span>
+        <span className="section-sub">
+          {loading ? "carregando…" : `${shown.length} vídeo(s)${totalSize ? ` · ${formatBytes(totalSize)}` : ""}`}
+        </span>
+        <span className="spacer" />
+        <button className="btn btn-ghost btn-sm" onClick={load} title="Recarregar">
+          <Icon name="refresh" size={13} />
+        </button>
+        {shown.length > 0 && (
+          <button className="btn btn-sm" onClick={toggleAll}>
+            <Icon name="select-all" size={12} />
+            {selected.size === shown.length ? "Desmarcar" : "Todos"}
           </button>
-          {selected.size > 0 && (
-            <button className="btn btn-sm btn-danger" onClick={() => setConfirm({ files: Array.from(selected) })}>
-              🗑 Excluir ({selected.size})
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="content-scroll">
-        {files.length === 0 ? (
-          <div className="empty">
-            <div style={{ fontSize: 32, marginBottom: 8 }}>📭</div>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Nenhum vídeo ainda</div>
-            <div style={{ fontSize: 12 }}>Os vídeos processados aparecerão aqui</div>
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
-            {files.map(f => {
-              const isSel = selected.has(f);
-              const url = `http://localhost:8000/output/${encodeURIComponent(f)}`;
-              return (
-                <div key={f} onClick={() => toggle(f)} className="card" style={{
-                  padding: 0, overflow: "hidden", cursor: "pointer",
-                  border: `1px solid ${isSel ? "var(--accent)" : "var(--border)"}`,
-                  background: isSel ? "rgba(124,106,247,0.07)" : "var(--surface)",
-                }}>
-                  <div style={{ aspectRatio: "9/16", background: "#000", position: "relative", overflow: "hidden" }}>
-                    <video
-                      src={url}
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                      preload="metadata"
-                      muted
-                      playsInline
-                      onMouseEnter={e => (e.currentTarget as HTMLVideoElement).play()}
-                      onMouseLeave={e => { const v = e.currentTarget as HTMLVideoElement; v.pause(); v.currentTime = 0; }}
-                    />
-                    {isSel && (
-                      <div style={{
-                        position: "absolute", top: 6, left: 6, width: 16, height: 16,
-                        borderRadius: 3, background: "var(--accent)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        fontSize: 9, color: "#fff",
-                      }}>✓</div>
-                    )}
-                    <button
-                      className="btn btn-xs btn-danger"
-                      style={{ position: "absolute", top: 5, right: 5 }}
-                      onClick={e => { e.stopPropagation(); setConfirm({ files: [f] }); }}
-                      title="Remover"
-                    >✕</button>
-                  </div>
-                  <div style={{ padding: "7px 9px", display: "flex", flexDirection: "column", gap: 5 }}>
-                    <div style={{ fontSize: 10, color: "var(--text2)", wordBreak: "break-all" }}>{f}</div>
-                    <a
-                      href={url} download={f}
-                      onClick={e => e.stopPropagation()}
-                      className="btn btn-sm"
-                      style={{ textDecoration: "none", justifyContent: "center" }}
-                    >⬇ Download</a>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+        )}
+        <button className="btn btn-primary btn-sm" onClick={downloadZip} disabled={!selected.size}>
+          <Icon name="download" size={12} /> Baixar ZIP ({selected.size})
+        </button>
+        {selected.size > 0 && (
+          <button className="btn btn-danger btn-sm" onClick={() => setConfirm([...selected])}>
+            <Icon name="trash" size={12} />
+          </button>
         )}
       </div>
+
+      {!loading && files.length === 0 ? (
+        <div className="panel">
+          <div className="empty">
+            <div className="empty-icon"><Icon name="folder" size={22} /></div>
+            <div className="empty-title">Nenhum vídeo gerado</div>
+            <div className="empty-hint">
+              Os vídeos compostos aparecem aqui. Eles ficam em pasta temporária e somem
+              quando o backend é reiniciado — baixe o que quiser guardar.
+            </div>
+          </div>
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="panel">
+          <div className="empty">
+            <div className="empty-icon"><Icon name="search" size={20} /></div>
+            <div className="empty-title">Nada com “{query}”</div>
+          </div>
+        </div>
+      ) : (
+        <div className="card-grid">
+          {shown.map(f => {
+            const isSel = selected.has(f.name);
+            const url = outputUrl(f.name);
+            return (
+              <div key={f.name} onClick={() => toggle(f.name)}
+                className={"media-card" + (isSel ? " selected" : "")}>
+                <div className="thumb" style={{ background: "#000" }}>
+                  {/* preload="none": com 100 resultados, "metadata" dispara 100
+                      requisições de vídeo assim que a página abre. */}
+                  <video
+                    src={url} preload="none" muted playsInline
+                    onMouseEnter={e => {
+                      const v = e.currentTarget;
+                      v.preload = "auto";
+                      v.play().catch(() => {});
+                    }}
+                    onMouseLeave={e => {
+                      const v = e.currentTarget;
+                      v.pause();
+                      v.currentTime = 0;
+                    }}
+                  />
+                  <div className={"check" + (isSel ? " on" : "")}>
+                    {isSel && <Icon name="check" size={11} />}
+                  </div>
+                  <button className="btn btn-xs" title="Abrir"
+                    style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,0.5)" }}
+                    onClick={e => { e.stopPropagation(); setPreview(f); }}>
+                    <Icon name="eye" size={12} />
+                  </button>
+                </div>
+                <div className="card-body">
+                  <div className="card-title" title={f.name}>{f.name}</div>
+                  <div className="card-meta">
+                    {f.size_bytes ? formatBytes(f.size_bytes) : ""}
+                    {f.size_bytes && f.modified_at ? " · " : ""}
+                    {f.modified_at ? formatDate(f.modified_at) : ""}
+                  </div>
+                </div>
+                <div className="card-actions" onClick={e => e.stopPropagation()}>
+                  <a href={url} download={f.name} className="btn btn-xs" style={{ textDecoration: "none", flex: 1 }}>
+                    <Icon name="download" size={12} /> Baixar
+                  </a>
+                  <button className="btn btn-xs btn-danger" title="Excluir"
+                    onClick={() => setConfirm([f.name])}>
+                    <Icon name="trash" size={12} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {preview && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setPreview(null); }}>
+          <div className="modal" style={{ width: "min(430px, 92vw)" }}>
+            <div className="modal-header">
+              <div>
+                <div className="modal-title" style={{ fontSize: 14 }}>Resultado</div>
+                <div style={{ fontSize: 11, color: "var(--text-3)", wordBreak: "break-all" }}>{preview.name}</div>
+              </div>
+              <button className="btn btn-ghost btn-icon" onClick={() => setPreview(null)} aria-label="Fechar">
+                <Icon name="close" size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <video src={outputUrl(preview.name)} controls autoPlay
+                style={{ width: "100%", borderRadius: "var(--r)", background: "#000" }} />
+            </div>
+            <div className="modal-footer">
+              <a href={outputUrl(preview.name)} download={preview.name} className="btn btn-primary btn-sm"
+                style={{ textDecoration: "none" }}>
+                <Icon name="download" size={12} /> Baixar
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirm && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setConfirm(null); }}>
+          <div className="modal" style={{ width: "min(420px, 92vw)" }}>
+            <div className="modal-header">
+              <div className="modal-title">Confirmar exclusão</div>
+            </div>
+            <div className="modal-body" style={{ fontSize: 13, color: "var(--text-2)" }}>
+              {confirm.length === 1
+                ? <>Excluir <strong style={{ color: "var(--text)" }}>{confirm[0]}</strong>?</>
+                : <>Excluir <strong style={{ color: "var(--text)" }}>{confirm.length} vídeos</strong> selecionados?</>}
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--err)" }}>
+                Esta ação não pode ser desfeita.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setConfirm(null)}>Cancelar</button>
+              <button className="btn btn-danger" onClick={() => execDelete(confirm)}>
+                <Icon name="trash" size={14} /> Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

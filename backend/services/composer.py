@@ -13,7 +13,12 @@ Duração:
   raw            — saída tem a duração do vídeo bruto (template é cortado ou congelado)
   template       — saída tem a duração do template (vídeo bruto é cortado)
   loop_template  — template faz loop até o vídeo bruto terminar
+
+Ajustes individuais:
+  Cada item da fila pode sobrescrever a área de destino e recortar a fonte, sem
+  alterar o template. Ver Settings.from_template().
 """
+from dataclasses import dataclass
 import subprocess
 import shutil
 import os
@@ -42,29 +47,114 @@ def _has_nvenc() -> bool:
         return False
 
 
-def _build_filter(tpl: Template) -> str:
+@dataclass
+class Settings:
+    """
+    Parâmetros de composição já resolvidos para UM vídeo.
+
+    O template define o padrão do lote; o item pode sobrescrever a área de
+    destino e recortar a fonte. Resolver tudo aqui evita espalhar `if override`
+    pelo resto do módulo — o restante do código nem sabe que override existe.
+    """
+    output_w: int
+    output_h: int
+    overlay_x: int
+    overlay_y: int
+    overlay_w: int
+    overlay_h: int
+    fit_mode: str
+    # Recorte da fonte em fração de 0..1 do vídeo bruto
+    crop_x: float = 0.0
+    crop_y: float = 0.0
+    crop_w: float = 1.0
+    crop_h: float = 1.0
+
+    @classmethod
+    def from_template(cls, tpl: Template, overrides: dict | None = None) -> "Settings":
+        o = overrides or {}
+
+        def pick(key: str, default):
+            # None explícito também significa "usa o template": o frontend manda
+            # a chave com None quando o usuário só mexeu no recorte.
+            value = o.get(key)
+            return default if value is None else value
+
+        s = cls(
+            output_w=tpl.output_w,
+            output_h=tpl.output_h,
+            overlay_x=int(pick("overlay_x", tpl.overlay_x)),
+            overlay_y=int(pick("overlay_y", tpl.overlay_y)),
+            overlay_w=int(pick("overlay_w", tpl.overlay_w)),
+            overlay_h=int(pick("overlay_h", tpl.overlay_h)),
+            fit_mode=str(pick("fit_mode", tpl.fit_mode)),
+            crop_x=float(pick("crop_x", 0.0)),
+            crop_y=float(pick("crop_y", 0.0)),
+            crop_w=float(pick("crop_w", 1.0)),
+            crop_h=float(pick("crop_h", 1.0)),
+        )
+        s.clamp()
+        return s
+
+    def clamp(self):
+        """
+        Corrige valores impossíveis em vez de deixar o FFmpeg falhar.
+
+        Um overlay maior que a saída, ou um recorte que começa em 0.9 e tem
+        largura 0.5, produziria um erro de filtergraph que chega ao usuário como
+        "FFmpeg saiu com código 1" — inútil para diagnosticar.
+        """
+        self.overlay_w = max(2, min(self.overlay_w, self.output_w))
+        self.overlay_h = max(2, min(self.overlay_h, self.output_h))
+        self.overlay_x = max(0, min(self.overlay_x, self.output_w - self.overlay_w))
+        self.overlay_y = max(0, min(self.overlay_y, self.output_h - self.overlay_h))
+
+        self.crop_x = min(max(self.crop_x, 0.0), 0.99)
+        self.crop_y = min(max(self.crop_y, 0.0), 0.99)
+        self.crop_w = min(max(self.crop_w, 0.01), 1.0 - self.crop_x)
+        self.crop_h = min(max(self.crop_h, 0.01), 1.0 - self.crop_y)
+
+        if self.fit_mode not in ("cover", "contain"):
+            self.fit_mode = "cover"
+
+    @property
+    def crops_source(self) -> bool:
+        return (self.crop_x, self.crop_y, self.crop_w, self.crop_h) != (0.0, 0.0, 1.0, 1.0)
+
+
+def _build_filter(st: Settings) -> str:
     """
     Monta a filtergraph do FFmpeg para:
     1. Escalar o template para a resolução de saída
-    2. Redimensionar/cortar o vídeo bruto para a área overlay
-    3. Sobrepor o vídeo bruto sobre o template nas coordenadas definidas
+    2. Recortar a fonte, se o vídeo tiver recorte individual
+    3. Redimensionar/cortar o vídeo bruto para a área overlay
+    4. Sobrepor o vídeo bruto sobre o template nas coordenadas definidas
     """
-    ow, oh = tpl.output_w, tpl.output_h
-    ax, ay, aw, ah = tpl.overlay_x, tpl.overlay_y, tpl.overlay_w, tpl.overlay_h
+    ow, oh = st.output_w, st.output_h
+    ax, ay, aw, ah = st.overlay_x, st.overlay_y, st.overlay_w, st.overlay_h
 
     # Escala o template para a resolução de saída
     scale_bg = f"[0:v]scale={ow}:{oh},setsar=1[bg]"
 
-    if tpl.fit_mode == "cover":
+    # Recorte da fonte com expressões relativas (iw/ih): o mesmo filtro serve
+    # para qualquer resolução de entrada, então um recorte feito na prévia de
+    # 720p continua correto quando o arquivo real é 4K.
+    crop_src = ""
+    if st.crops_source:
+        crop_src = (
+            f"crop=iw*{st.crop_w:.6f}:ih*{st.crop_h:.6f}:"
+            f"iw*{st.crop_x:.6f}:ih*{st.crop_y:.6f},"
+        )
+
+    if st.fit_mode == "cover":
         # Escala mantendo proporção para cobrir a área, depois corta o excesso
         scale_raw = (
-            f"[1:v]scale={aw}:{ah}:force_original_aspect_ratio=increase,"
+            f"[1:v]{crop_src}scale={aw}:{ah}:force_original_aspect_ratio=increase,"
             f"crop={aw}:{ah},setsar=1[raw]"
         )
     else:  # contain
         # Escala para caber inteiro, adiciona bordas pretas
         scale_raw = (
-            f"[1:v]scale={aw}:{ah}:force_original_aspect_ratio=decrease,"
+            f"[1:v]{crop_src}scale={aw}:{ah}:force_original_aspect_ratio=decrease,"
             f"pad={aw}:{ah}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[raw]"
         )
 
@@ -153,11 +243,16 @@ def compose(
     output_path: str,
     progress_callback=None,
     log_path: str = None,
+    overrides: dict | None = None,
 ) -> None:
     """
     Compõe um vídeo bruto sobre o template e salva em output_path.
+
+    `overrides` traz os ajustes individuais do item (recorte da fonte e área de
+    destino). Sem ele, o vídeo segue exatamente o template.
     Lança exceção em caso de falha.
     """
+    settings = Settings.from_template(template, overrides)
     use_nvenc = _has_nvenc()
     encoder = "h264_nvenc" if use_nvenc else "libx264"
     encode_preset = "p4" if use_nvenc else "fast"
@@ -177,7 +272,7 @@ def compose(
     raw_duration = _get_duration(input_path)
     has_tpl_audio = _template_has_audio(template.file_path)
 
-    filter_graph = _build_filter(template)
+    filter_graph = _build_filter(settings)
     audio_args = _build_audio_args(template, has_tpl_audio)
     duration_args = _duration_args(template)
 
