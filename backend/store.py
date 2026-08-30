@@ -3,25 +3,33 @@ Store em memória para jobs e itens.
 Uploads, outputs e logs ficam em diretório temporário — apagados ao reiniciar.
 Templates são persistidos no SQLite (database.py).
 """
-import tempfile
 import shutil
-from pathlib import Path
 from datetime import datetime
 from threading import Lock
 
-# Diretório temporário da sessão
-_tmpdir = tempfile.mkdtemp(prefix="flaxy_")
-UPLOADS_DIR = Path(_tmpdir) / "uploads"
-OUTPUT_DIR  = Path(_tmpdir) / "output"
-LOGS_DIR    = Path(_tmpdir) / "logs"
+from settings import settings
+
+# Área de trabalho da instância. Local: um diretório temporário novo a cada
+# execução. No Render: o disco efêmero do contêiner, que já reinicia limpo.
+UPLOADS_DIR = settings.WORK_DIR / "uploads"
+OUTPUT_DIR  = settings.WORK_DIR / "output"
+LOGS_DIR    = settings.WORK_DIR / "logs"
 
 for _d in (UPLOADS_DIR, OUTPUT_DIR, LOGS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
 def cleanup_temp():
-    """Remove todos os arquivos temporários da sessão."""
-    shutil.rmtree(_tmpdir, ignore_errors=True)
+    """
+    Esvazia a área de trabalho no desligamento.
+
+    Remove o conteúdo, não o diretório: em produção ele pode ser um ponto de
+    montagem, e apagar a montagem deixaria o próximo start sem lugar para
+    escrever.
+    """
+    for d in (UPLOADS_DIR, OUTPUT_DIR, LOGS_DIR):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
 
 
 # ── Contadores ────────────────────────────────────────────────────────────────

@@ -3,11 +3,11 @@ Worker de processamento: consome jobs da fila e chama o composer.
 Usa store em memória para jobs/itens. Sem acesso ao banco de dados.
 """
 import asyncio
-import os
 import re
 from pathlib import Path
 from datetime import datetime
 from database import SessionLocal, Template
+from settings import settings
 from services.composer import compose
 from ws_manager import manager
 import store
@@ -17,7 +17,7 @@ _SAFE_NAME_RE = re.compile(r"[^\w\-.]")
 # FFmpeg satura CPU/GPU sozinho. Sem esse limite, disparar dois jobs em paralelo
 # faz os dois ficarem mais lentos que se rodassem em sequência — e, com NVENC,
 # pode estourar o número de sessões simultâneas da placa.
-MAX_CONCURRENT_RENDERS = int(os.getenv("FLAXY_MAX_CONCURRENT", "1"))
+MAX_CONCURRENT_RENDERS = settings.MAX_CONCURRENT_RENDERS
 _render_slot = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
 
 

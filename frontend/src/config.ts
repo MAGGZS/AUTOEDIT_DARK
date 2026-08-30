@@ -15,24 +15,46 @@ export const API_BASE = (
   import.meta.env.VITE_API_URL ?? "http://localhost:8000"
 ).replace(/\/+$/, "");
 
+/**
+ * Segredo compartilhado exigido pelo backend quando FLAXY_API_KEY está definida.
+ *
+ * Vale repetir o que ele não é: isto vai no bundle do navegador, então qualquer
+ * pessoa com o site aberto consegue lê-lo. Serve só para que a URL da API, se
+ * descoberta por acaso, não vire renderização de vídeo por conta da casa até o
+ * login existir — não separa dados nem identifica ninguém.
+ */
+export const API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
+
+/**
+ * Anexa a chave de acesso a uma URL carregada direto pelo navegador.
+ *
+ * `<img src>` e `<video src>` não mandam cabeçalho, então o interceptador do
+ * axios não alcança essas requisições: sem isto, ligar a chave no backend
+ * quebraria todas as miniaturas e prévias do app.
+ */
+const withKey = (url: string) => {
+  if (!API_KEY) return url;
+  return url + (url.includes("?") ? "&" : "?") + `key=${encodeURIComponent(API_KEY)}`;
+};
+
 /** ws:// ou wss:// derivado do próprio API_BASE, sem hardcode de host. */
-export const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws";
+export const WS_URL = withKey(API_BASE.replace(/^http/, "ws") + "/ws");
 
 /** Arquivo de fundo de um template. */
 export const templateFileUrl = (templateId: number) =>
-  `${API_BASE}/templates/file/${templateId}`;
+  withKey(`${API_BASE}/templates/file/${templateId}`);
 
 /** Vídeo bruto ainda no diretório temporário do backend. */
 export const uploadUrl = (filename: string) =>
-  `${API_BASE}/uploads/${encodeURIComponent(filename)}`;
+  withKey(`${API_BASE}/uploads/${encodeURIComponent(filename)}`);
 
 /** Vídeo já processado, pronto para preview ou download. */
 export const outputUrl = (filename: string) =>
-  `${API_BASE}/output/${encodeURIComponent(filename)}`;
+  withKey(`${API_BASE}/output/${encodeURIComponent(filename)}`);
 
 /** ZIP com a seleção de vídeos processados. */
 export const outputZipUrl = (filenames: string[]) =>
-  `${API_BASE}/output-zip?filenames=${encodeURIComponent(filenames.join(","))}`;
+  withKey(`${API_BASE}/output-zip?filenames=${encodeURIComponent(filenames.join(","))}`);
 
 /** Só o nome do arquivo, a partir de um caminho absoluto do backend. */
 export const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;

@@ -2,7 +2,6 @@
 Router: upload de vídeos brutos, criação de jobs e consulta de status.
 Jobs e itens ficam em memória (store.py). Uploads/outputs em diretório temporário.
 """
-import shutil
 import zipfile
 import io
 import re
@@ -15,9 +14,13 @@ from sqlalchemy.orm import Session
 from database import get_db, Template
 from schemas import JobCreate, JobOut, MAX_VIDEOS_PER_JOB
 from services.worker import run_job
+from auth import require_api_key
+from settings import settings
 import store
 
-router = APIRouter(tags=["jobs"])
+# O porteiro vale para o router inteiro: uma rota nova nasce protegida em vez de
+# depender de alguém lembrar de adicionar a dependência.
+router = APIRouter(tags=["jobs"], dependencies=[Depends(require_api_key)])
 
 _SAFE_RE = re.compile(r"[^\w\-.]")
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
@@ -60,11 +63,25 @@ async def upload_videos(files: list[UploadFile] = File(...)):
             400,
             f"Máximo de {MAX_VIDEOS_PER_JOB} vídeos por envio (recebidos {len(files)})",
         )
+    limit_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
     saved = []
     for f in files:
         dest = _inside(store.UPLOADS_DIR, _unique_upload_name(f.filename or "upload.mp4"))
+        written = 0
         with dest.open("wb") as out:
-            shutil.copyfileobj(f.file, out)
+            # Cópia em blocos com corte no limite: `copyfileobj` puro gravaria os
+            # 5 GB inteiros antes de qualquer checagem, e numa instância pequena
+            # o processo morre por falta de disco antes disso.
+            while chunk := f.file.read(1024 * 1024):
+                written += len(chunk)
+                if limit_bytes and written > limit_bytes:
+                    out.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(
+                        413,
+                        f"'{f.filename}' passa do limite de {settings.MAX_UPLOAD_MB} MB por arquivo",
+                    )
+                out.write(chunk)
         saved.append({"path": str(dest), "name": Path(f.filename or dest.name).name})
     return {"files": [s["path"] for s in saved], "items": saved}
 

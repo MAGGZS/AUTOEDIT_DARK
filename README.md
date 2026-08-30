@@ -17,6 +17,16 @@ opção de ajustar o recorte de cada vídeo individualmente.
 > FFmpeg deve estar no PATH do sistema. Após baixar, extraia e adicione a pasta `bin/` nas variáveis de ambiente do Windows.
 > O `start.bat` consulta `/health` e avisa antes de você descobrir na hora de processar.
 
+## Estrutura
+
+| Onde roda | O quê |
+|---|---|
+| `frontend/` | SPA em React + Vite. Vai para a **Vercel**. |
+| `backend/` | API FastAPI + FFmpeg. Vai para o **Render**, em Docker. |
+| `db/` | Schema PostgreSQL do modelo multiusuário. |
+
+Deploy e o caminho para contas de usuário: **[DEPLOY.md](DEPLOY.md)**.
+
 ## Instalação e execução
 
 ```bat
@@ -63,10 +73,17 @@ comum e quebra quando os vídeos vêm de fontes diferentes: um gravado deitado e
 outro em pé, encaixados na mesma janela 9:16 com `cover`, saem com cortes
 centralizados que decapitam metade das pessoas.
 
-O botão **Recortar** de cada card abre um editor cujo palco tem exatamente a
-proporção da área de destino. Arraste para reposicionar, use a roda do mouse para
-aproximar: o que estiver visível é o que aparece no vídeo final.
+O botão **Recortar** de cada card abre um editor que mostra o quadro inteiro com
+o descartado escurecido e uma moldura de 8 alças por cima.
 
+- **Cada lado corta sozinho**: puxar a alça esquerda muda só `x` e `w`; a de
+  baixo, só `h`. Dá para tirar uma faixa lateral sem mexer no resto.
+- **Aproximação** por slider ou roda do mouse, escalando pela âncora central.
+- **Proporção travada** mantém a proporção do template ao redimensionar;
+  **Proporção do template** reencaixa a moldura.
+- Quando o recorte foge da proporção da área, você escolhe entre *preencher
+  (corta)* e *caber (bordas)* — em vez de o sistema decidir e desfazer em
+  silêncio o recorte que você acabou de fazer.
 - O recorte é gravado como fração `0..1` da fonte, então vale igual para um
   arquivo 720p ou 4K.
 - Cards com recorte próprio ganham um contorno roxo e a etiqueta *recorte*.
@@ -95,10 +112,17 @@ FLAXY/
 │   ├── services/
 │   │   ├── composer.py      # Motor FFmpeg + Settings (template + overrides)
 │   │   └── worker.py        # Worker assíncrono (1 render por vez)
+│   ├── settings.py          # Toda a configuração por ambiente
+│   ├── auth.py              # Encaixe para contas de usuário
+│   ├── migrations/          # Alembic
+│   ├── Dockerfile           # Imagem com FFmpeg, usada no Render
 │   └── storage/templates/   # Arquivos de fundo (persistentes)
 ├── db/
 │   └── schema.postgres.sql  # Schema multiusuário para PostgreSQL
+├── render.yaml              # Blueprint do backend no Render
+├── DEPLOY.md                # Passo a passo de Vercel + Render
 ├── frontend/
+│   ├── vercel.json          # Rewrites da SPA e cabeçalhos
 │   └── src/
 │       ├── App.tsx          # Trilho de ícones, barra superior, rotas
 │       ├── App.css          # Sistema de design (tokens, componentes)
@@ -109,7 +133,7 @@ FLAXY/
 │       ├── components/
 │       │   ├── CompositionEditor.tsx  # Enquadramento geral (drag/resize)
 │       │   ├── CompositionThumb.tsx   # Prévia da composição na miniatura
-│       │   └── CropEditor.tsx         # Recorte individual (pan/zoom)
+│       │   └── CropEditor.tsx         # Recorte individual (lados livres)
 │       └── pages/
 │           ├── DashboardPage.tsx
 │           ├── TemplatesPage.tsx
@@ -143,12 +167,43 @@ em sequência. Para mudar, use a variável `FLAXY_MAX_CONCURRENT`.
 | Templates | SQLite (`backend/flaxy.db`) | sim |
 | Arquivos de fundo | `backend/storage/templates/` | sim |
 | Lotes e progresso | memória do processo | não |
-| Uploads e vídeos prontos | diretório temporário do sistema | não |
+| Uploads e vídeos prontos | diretório temporário do servidor | não |
+| Lista de vídeos da aba | `sessionStorage` (só metadados) | sobrevive ao F5, não ao fechar a aba |
 
 Baixe o que quiser guardar antes de encerrar o backend.
 
 > Um `autoedit.db` de versões anteriores é renomeado automaticamente para
 > `flaxy.db` na primeira inicialização, preservando os templates.
+
+## Configuração
+
+Tudo que muda entre a máquina local e o deploy passa por `backend/settings.py`;
+nenhum outro módulo lê variável de ambiente. Sem configurar nada, o backend roda
+em SQLite com os arquivos em `backend/storage/` e o CORS liberado para o Vite.
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `FLAXY_ENV` | `local` | `production` fecha `/docs` e liga os avisos de configuração |
+| `DATABASE_URL` | SQLite local | PostgreSQL no deploy (`postgres://` é convertido) |
+| `CORS_ORIGINS` | portas do Vite | Domínios que podem chamar a API |
+| `FLAXY_STORAGE_DIR` | `backend/storage` | Onde ficam os fundos dos templates |
+| `FLAXY_WORK_DIR` | temporário do SO | Uploads e saídas, descartáveis |
+| `FLAXY_API_KEY` | vazio | Segredo interino, até existir login |
+| `FLAXY_MAX_CONCURRENT` | `1` | Renders simultâneos |
+| `FLAXY_MAX_UPLOAD_MB` | `0` (sem limite) | Teto por arquivo enviado |
+
+Exemplos comentados em `backend/.env.example` e `frontend/.env.example`.
+
+## Migrações
+
+O schema é versionado com Alembic:
+
+```bash
+cd backend && alembic upgrade head
+```
+
+Num banco que já existe e nunca passou por migração, carimbe a baseline antes:
+`alembic stamp 0001_baseline`.
 
 ## Banco de usuários
 

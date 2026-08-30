@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
+from settings import settings
+
 # Teto de itens por lote. Existe por dois motivos: um job de 500 vídeos deixaria
 # a máquina renderizando por horas sem feedback útil, e a lista de progresso na
 # interface fica ilegível muito antes disso.
-MAX_VIDEOS_PER_JOB = 100
+MAX_VIDEOS_PER_JOB = settings.MAX_VIDEOS_PER_JOB
 
 
 class TemplateCreate(BaseModel):

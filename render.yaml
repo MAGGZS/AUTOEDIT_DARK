@@ -1,0 +1,77 @@
+# FLAXY — infraestrutura no Render (Blueprint)
+#
+# Aplicar: no painel do Render, New → Blueprint, apontando para este repositório.
+# O que este arquivo declara:
+#   - um serviço web em Docker (o FFmpeg exige imagem própria)
+#   - um PostgreSQL gerenciado, já ligado ao serviço via DATABASE_URL
+#   - um disco persistente para os arquivos de fundo dos templates
+#
+# O frontend NÃO está aqui: ele vai para a Vercel (ver frontend/vercel.json).
+
+services:
+  - type: web
+    name: flaxy-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    region: oregon
+    # `starter` e não `free`: o plano gratuito não aceita disco persistente e
+    # hiberna por inatividade, o que interrompe qualquer lote em andamento.
+    plan: starter
+    healthCheckPath: /health
+
+    # O FFmpeg é o gargalo e satura a CPU sozinho. Mais de uma instância só faz
+    # sentido depois que os jobs saírem da memória para o banco — hoje cada
+    # instância teria a sua própria fila, invisível para as outras.
+    numInstances: 1
+
+    disk:
+      name: flaxy-storage
+      mountPath: /data
+      sizeGB: 5
+
+    envVars:
+      - key: FLAXY_ENV
+        value: production
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: flaxy-db
+          property: connectionString
+
+      # Precisa ser o domínio real do frontend na Vercel. Sem login, é a única
+      # coisa que impede outro site de usar esta API.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Previews da Vercel trocam de subdomínio a cada deploy.
+      - key: CORS_ORIGIN_REGEX
+        sync: false
+
+      # Gerado pelo Render; o mesmo valor vai no frontend como VITE_API_KEY.
+      - key: FLAXY_API_KEY
+        generateValue: true
+
+      - key: FLAXY_STORAGE_DIR
+        value: /data/storage
+
+      - key: FLAXY_WORK_DIR
+        value: /tmp/flaxy
+
+      - key: FLAXY_MAX_CONCURRENT
+        value: "1"
+
+      - key: FLAXY_MAX_VIDEOS_PER_JOB
+        value: "100"
+
+      # Teto por arquivo. Ajuste conforme o plano: numa instância pequena, um
+      # upload sem limite derruba o processo por falta de memória e disco.
+      - key: FLAXY_MAX_UPLOAD_MB
+        value: "500"
+
+databases:
+  - name: flaxy-db
+    databaseName: flaxy
+    user: flaxy
+    plan: basic-256mb
+    region: oregon

@@ -10,10 +10,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from database import get_db, Template
 from schemas import TemplateCreate, TemplateOut
+from settings import settings
+from auth import CurrentUser, current_user, owner_filter
 
 router = APIRouter(prefix="/templates", tags=["templates"])
-TEMPLATES_DIR = Path(__file__).parent.parent / "storage" / "templates"
-TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Único diretório que precisa sobreviver a um deploy: é onde ficam os fundos.
+TEMPLATES_DIR = settings.TEMPLATES_DIR
 
 _SAFE_FILENAME_RE = re.compile(r"[^\w\-.]")
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi",
@@ -79,12 +82,14 @@ async def create_template(
     duration_rule: str = Form("raw"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(current_user),
 ):
     dest = _resolve_inside(TEMPLATES_DIR, _unique_filename(file.filename or "template"))
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
     tpl = Template(
+        owner_id=user.id,
         name=name, file_path=str(dest),
         overlay_x=overlay_x, overlay_y=overlay_y,
         overlay_w=overlay_w, overlay_h=overlay_h,
@@ -100,8 +105,12 @@ async def create_template(
 
 
 @router.get("/", response_model=list[TemplateOut])
-def list_templates(db: Session = Depends(get_db)):
-    return db.query(Template).order_by(Template.created_at.desc()).all()
+def list_templates(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(current_user),
+):
+    query = owner_filter(db.query(Template), Template, user)
+    return query.order_by(Template.created_at.desc()).all()
 
 
 @router.get("/file/{template_id}")
@@ -117,7 +126,8 @@ def get_template_file(template_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{template_id}", response_model=TemplateOut)
-def get_template(template_id: int, db: Session = Depends(get_db)):
+def get_template(template_id: int, db: Session = Depends(get_db),
+                 user: CurrentUser = Depends(current_user)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
@@ -125,7 +135,9 @@ def get_template(template_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{template_id}", response_model=TemplateOut)
-def update_template(template_id: int, data: TemplateCreate, db: Session = Depends(get_db)):
+def update_template(template_id: int, data: TemplateCreate,
+                    db: Session = Depends(get_db),
+                    user: CurrentUser = Depends(current_user)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
@@ -137,7 +149,8 @@ def update_template(template_id: int, data: TemplateCreate, db: Session = Depend
 
 
 @router.delete("/{template_id}")
-def delete_template(template_id: int, db: Session = Depends(get_db)):
+def delete_template(template_id: int, db: Session = Depends(get_db),
+                 user: CurrentUser = Depends(current_user)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
@@ -149,7 +162,8 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{template_id}/duplicate", response_model=TemplateOut, status_code=201)
-def duplicate_template(template_id: int, db: Session = Depends(get_db)):
+def duplicate_template(template_id: int, db: Session = Depends(get_db),
+                       user: CurrentUser = Depends(current_user)):
     tpl = db.query(Template).filter(Template.id == template_id).first()
     if not tpl:
         raise HTTPException(404, "Template não encontrado")
@@ -165,6 +179,7 @@ def duplicate_template(template_id: int, db: Session = Depends(get_db)):
         new_path = tpl.file_path
 
     new_tpl = Template(
+        owner_id=user.id,
         name=f"{tpl.name} (cópia)", file_path=new_path,
         overlay_x=tpl.overlay_x, overlay_y=tpl.overlay_y,
         overlay_w=tpl.overlay_w, overlay_h=tpl.overlay_h,
